@@ -4,6 +4,7 @@ import "dotenv/config";
 import express from "express";
 import { google } from "googleapis";
 import multer from "multer";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -13,6 +14,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const dataDir = path.join(rootDir, "data");
 const uploadDir = path.join(rootDir, "uploads");
+const clientDistDir = path.join(rootDir, "client", "dist");
+const clientIndexPath = path.join(clientDistDir, "index.html");
 const jsonPath = path.join(dataDir, "submissions.json");
 const csvPath = path.join(dataDir, "submissions.csv");
 
@@ -152,6 +155,19 @@ app.post("/api/submissions", async (req, res, next) => {
     next(error);
   }
 });
+
+if (existsSync(clientIndexPath)) {
+  app.use(express.static(clientDistDir));
+
+  app.get(/.*/, (req, res, next) => {
+    if (req.path.startsWith("/api") || req.path.startsWith("/uploads")) {
+      next();
+      return;
+    }
+
+    res.sendFile(clientIndexPath);
+  });
+}
 
 app.use((error, _req, res, _next) => {
   console.error(error);

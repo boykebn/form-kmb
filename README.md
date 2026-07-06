@@ -74,3 +74,117 @@ Jika konfigurasi Cloudinary lengkap, backend akan memprioritaskan Cloudinary unt
 3. Isi `VITE_GOOGLE_MAPS_API_KEY` di `.env`.
 
 Vite sudah dikonfigurasi membaca `.env` dari root project, jadi satu file `.env` dipakai oleh frontend dan backend.
+
+## Deploy ke VPS
+
+Rekomendasi production:
+
+- Node.js 20 atau lebih baru
+- PM2 untuk menjalankan aplikasi
+- Nginx sebagai reverse proxy
+- Certbot untuk SSL domain
+
+Di VPS:
+
+```bash
+sudo apt update
+sudo apt install -y git nginx certbot python3-certbot-nginx
+
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+sudo npm install -g pm2
+```
+
+Clone project:
+
+```bash
+cd /var/www
+sudo git clone https://github.com/boykebn/form-kmb.git
+sudo chown -R $USER:$USER /var/www/form-kmb
+cd /var/www/form-kmb
+
+npm install
+npm --prefix client install
+npm run build
+```
+
+Buat file `.env` di VPS dan isi dengan env production. Untuk domain:
+
+```env
+PORT=4444
+CLIENT_ORIGIN=https://kmbgroup.id
+```
+
+Jalankan aplikasi:
+
+```bash
+pm2 start npm --name form-kmb -- start
+pm2 save
+pm2 startup
+```
+
+Konfigurasi Nginx:
+
+```nginx
+server {
+  server_name kmbgroup.id www.kmbgroup.id;
+
+  location / {
+    proxy_pass http://127.0.0.1:4444;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+```
+
+Simpan ke `/etc/nginx/sites-available/kmbgroup.id`, lalu aktifkan:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/kmbgroup.id /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+sudo certbot --nginx -d kmbgroup.id -d www.kmbgroup.id
+```
+
+## Auto Deploy dari GitHub
+
+Tambahkan GitHub Actions secret di repo:
+
+- `VPS_HOST`
+- `VPS_USER`
+- `VPS_SSH_KEY`
+- `VPS_PORT` opsional, default `22`
+
+Contoh workflow `.github/workflows/deploy.yml`:
+
+```yaml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || '22' }}
+          script: |
+            cd /var/www/form-kmb
+            git pull origin main
+            npm install
+            npm --prefix client install
+            npm run build
+            pm2 restart form-kmb || pm2 start npm --name form-kmb -- start
+            pm2 save
+```
