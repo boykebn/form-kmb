@@ -330,8 +330,8 @@ function CompanyProfile() {
         </div>
         <div className="company-footer-col">
           <span>Kontak</span>
-          <a href="mailto:ptkreasimitraberdikari@gmail.com">
-            ptkreasimitraberdikari@gmail.com
+          <a href="mailto:contact@kmbgroup.id">
+            contact@kmbgroup.id
           </a>
           <a href="tel:082112941420">082112941420</a>
         </div>
@@ -541,8 +541,8 @@ function ProgramBssPage() {
         </div>
         <div className="company-footer-col">
           <span>Kontak</span>
-          <a href="mailto:ptkreasimitraberdikari@gmail.com">
-            ptkreasimitraberdikari@gmail.com
+          <a href="mailto:contact@kmbgroup.id">
+            contact@kmbgroup.id
           </a>
           <a href="tel:082112941420">082112941420</a>
         </div>
