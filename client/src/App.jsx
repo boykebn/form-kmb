@@ -544,7 +544,7 @@ function ProgramBssPage() {
           <a href="mailto:contact@kmbgroup.id">
             contact@kmbgroup.id
           </a>
-          <a href="tel:082112941420">082112941420</a>
+          {/* <a href="tel:082112941420">082112941420</a> */}
         </div>
       </footer>
     </main>
