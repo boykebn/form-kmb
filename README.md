@@ -17,61 +17,18 @@ npm run dev
 ```
 
 Frontend: http://localhost:5173  
-Backend: http://localhost:4444
+Backend: http://localhost:4100
 
 ## Penyimpanan
 
-Untuk production, submission disimpan ke PostgreSQL jika `DATABASE_URL` terisi. Backend juga tetap membuat backup lokal ke:
+Secara default, submission disimpan dengan format kolom internal ke:
 
 - `data/submissions.json`
 - `data/submissions.csv`
 
-Kalau `DATABASE_URL` kosong, backend akan memakai file lokal sebagai penyimpanan utama.
+Kolom spreadsheet internal:
 
-Kolom data internal:
-
-`No`, `Site Name`, `Address`, `Google Map URL`, `City`, `Province`, `District`, `Subdistrict`, `Rental Price`, `Slot`, `Venue PIC`, `Account Number`, `Rent Period`, `Key Account`, `No. Telp Lokasi`, `Foto Lokasi`, `Approval`, `Awal Kontrak`, `Akhir Kontrak`, `Masa Kontrak`, `Termin Pembayaran`.
-
-## Sambungkan ke PostgreSQL
-
-1. Install PostgreSQL di VPS.
-2. Buat database dan user khusus aplikasi.
-3. Isi `DATABASE_URL` di `.env`.
-4. Restart aplikasi.
-
-Contoh setup di VPS:
-
-```bash
-sudo apt update
-sudo apt install -y postgresql postgresql-contrib
-sudo systemctl enable --now postgresql
-```
-
-Buat database dan user:
-
-```bash
-sudo -u postgres psql
-```
-
-Di prompt PostgreSQL:
-
-```sql
-CREATE DATABASE form_kmb;
-CREATE USER form_kmb_user WITH ENCRYPTED PASSWORD 'GANTI_PASSWORD_KUAT';
-GRANT ALL PRIVILEGES ON DATABASE form_kmb TO form_kmb_user;
-\c form_kmb
-GRANT ALL ON SCHEMA public TO form_kmb_user;
-\q
-```
-
-Isi `.env`:
-
-```env
-DATABASE_URL=postgresql://form_kmb_user:GANTI_PASSWORD_KUAT@localhost:5432/form_kmb
-DATABASE_SSL=false
-```
-
-Tabel `submissions` akan dibuat otomatis saat submit pertama.
+`No`, `Site Name`, `Address`, `Google Map URL`, `City`, `Province`, `Rental Price`, `Slot`, `Venue PIC`, `Account Number`, `Rent Period`, `Key Account`, `No. Telp Lokasi`, `Foto Lokasi`, `Approval`, `Awal Kontrak`, `Akhir Kontrak`, `Masa Kontrak`, `Termin Pembayaran`.
 
 ## Sambungkan ke Google Sheets
 
@@ -80,9 +37,8 @@ Tabel `submissions` akan dibuat otomatis saat submit pertama.
 3. Share spreadsheet ke email service account sebagai Editor.
 4. Copy `.env.example` menjadi `.env`.
 5. Isi `GOOGLE_SHEETS_ID`, `GOOGLE_SHEETS_TAB`, `GOOGLE_SERVICE_ACCOUNT_EMAIL`, dan `GOOGLE_PRIVATE_KEY`.
-6. Set `GOOGLE_SHEETS_MIRROR=true` jika data tetap ingin dicopy ke Sheets.
 
-Google Sheets sekarang bersifat mirror opsional. Kalau Sheets down, submit form tetap sukses selama database berhasil menyimpan data.
+Saat env Google Sheets lengkap, backend akan tetap menyimpan lokal dan juga append ke spreadsheet.
 
 ## Simpan Foto ke Google Drive
 
@@ -132,7 +88,7 @@ Di VPS:
 
 ```bash
 sudo apt update
-sudo apt install -y git nginx certbot python3-certbot-nginx postgresql postgresql-contrib
+sudo apt install -y git nginx certbot python3-certbot-nginx
 
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt install -y nodejs
@@ -157,8 +113,6 @@ Buat file `.env` di VPS dan isi dengan env production. Untuk domain:
 ```env
 PORT=4444
 CLIENT_ORIGIN=https://kmbgroup.id
-DATABASE_URL=postgresql://form_kmb_user:GANTI_PASSWORD_KUAT@localhost:5432/form_kmb
-DATABASE_SSL=false
 ```
 
 Jalankan aplikasi:
