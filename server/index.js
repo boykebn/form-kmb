@@ -7,6 +7,7 @@ import multer from "multer";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import pg from "pg";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
@@ -22,6 +23,8 @@ const csvPath = path.join(dataDir, "submissions.csv");
 const app = express();
 const port = Number(process.env.PORT || 4444);
 const allowedOrigin = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+let databasePool;
+let databaseReady;
 
 const fields = [
   "no",
@@ -95,6 +98,7 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     storage: getStorageLabel(),
+    database: hasDatabaseConfig(),
   });
 });
 
@@ -145,8 +149,8 @@ app.post("/api/submissions", async (req, res, next) => {
 
     const submission = await buildInternalSubmission(formData);
 
-    await saveLocal(submission);
-    await appendToGoogleSheets(submission);
+    await saveSubmission(submission);
+    await mirrorToGoogleSheets(submission);
 
     res
       .status(201)
@@ -271,7 +275,7 @@ async function ensureUploadDir(_req, _res, next) {
 
 async function buildInternalSubmission(formData) {
   return {
-    no: await getNextLocalNumber(),
+    no: await getNextSubmissionNumber(),
     siteName: formData.namaLokasi,
     address: formData.alamat,
     googleMapUrl: formData.googleMapUrl,
@@ -295,9 +299,31 @@ async function buildInternalSubmission(formData) {
   };
 }
 
+async function getNextSubmissionNumber() {
+  if (hasDatabaseConfig()) {
+    return getNextDatabaseNumber();
+  }
+
+  return getNextLocalNumber();
+}
+
 async function getNextLocalNumber() {
   const existing = await readJsonArray(jsonPath);
   return existing.length + 1;
+}
+
+async function saveSubmission(submission) {
+  if (hasDatabaseConfig()) {
+    await saveToDatabase(submission);
+    try {
+      await saveLocal(submission);
+    } catch (error) {
+      console.error("Gagal membuat backup lokal submission:", error);
+    }
+    return;
+  }
+
+  await saveLocal(submission);
 }
 
 async function saveLocal(submission) {
@@ -355,13 +381,22 @@ function hasCloudinaryConfig() {
   );
 }
 
+function hasDatabaseConfig() {
+  return Boolean(process.env.DATABASE_URL);
+}
+
 function getStorageLabel() {
   const fileStorage = hasCloudinaryConfig()
     ? "cloudinary"
     : hasDriveConfig()
       ? "google-drive"
       : "local";
-  return hasSheetsConfig() ? `${fileStorage}+google-sheets` : fileStorage;
+  const dataStorage = hasDatabaseConfig() ? "postgres" : "local";
+  const sheetsMirror =
+    process.env.GOOGLE_SHEETS_MIRROR === "true" && hasSheetsConfig()
+      ? "+google-sheets-mirror"
+      : "";
+  return `${fileStorage}+${dataStorage}${sheetsMirror}`;
 }
 
 function getGoogleAuth(scopes) {
@@ -396,6 +431,111 @@ async function appendToGoogleSheets(submission) {
       values: [targetFields.map((field) => sheetSubmission[field])],
     },
   });
+}
+
+async function mirrorToGoogleSheets(submission) {
+  if (process.env.GOOGLE_SHEETS_MIRROR !== "true") return;
+
+  try {
+    await appendToGoogleSheets(submission);
+  } catch (error) {
+    console.error("Gagal mirror data ke Google Sheets:", error);
+  }
+}
+
+function getDatabasePool() {
+  if (!databasePool) {
+    databasePool = new pg.Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl:
+        process.env.DATABASE_SSL === "true"
+          ? { rejectUnauthorized: false }
+          : undefined,
+    });
+  }
+
+  return databasePool;
+}
+
+async function ensureDatabase() {
+  if (!hasDatabaseConfig()) return;
+  if (!databaseReady) {
+    databaseReady = getDatabasePool().query(`
+      CREATE TABLE IF NOT EXISTS submissions (
+        no BIGINT PRIMARY KEY,
+        site_name TEXT NOT NULL,
+        address TEXT NOT NULL,
+        google_map_url TEXT NOT NULL,
+        city TEXT NOT NULL,
+        province TEXT NOT NULL,
+        district TEXT NOT NULL,
+        subdistrict TEXT NOT NULL,
+        rental_price TEXT DEFAULT '',
+        slot TEXT NOT NULL,
+        venue_pic TEXT NOT NULL,
+        account_number TEXT NOT NULL,
+        rent_period TEXT DEFAULT '',
+        key_account TEXT NOT NULL,
+        no_telp_lokasi TEXT NOT NULL,
+        foto_lokasi TEXT NOT NULL,
+        approval TEXT DEFAULT '',
+        awal_kontrak TEXT DEFAULT '',
+        akhir_kontrak TEXT DEFAULT '',
+        masa_kontrak TEXT DEFAULT '',
+        termin_pembayaran TEXT DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+  }
+
+  await databaseReady;
+}
+
+async function getNextDatabaseNumber() {
+  await ensureDatabase();
+
+  const response = await getDatabasePool().query(
+    "SELECT COALESCE(MAX(no), 0) + 1 AS next_no FROM submissions",
+  );
+  return Number(response.rows[0].next_no);
+}
+
+async function saveToDatabase(submission) {
+  await ensureDatabase();
+
+  await getDatabasePool().query(
+    `
+      INSERT INTO submissions (
+        no,
+        site_name,
+        address,
+        google_map_url,
+        city,
+        province,
+        district,
+        subdistrict,
+        rental_price,
+        slot,
+        venue_pic,
+        account_number,
+        rent_period,
+        key_account,
+        no_telp_lokasi,
+        foto_lokasi,
+        approval,
+        awal_kontrak,
+        akhir_kontrak,
+        masa_kontrak,
+        termin_pembayaran
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7,
+        $8, $9, $10, $11, $12, $13, $14,
+        $15, $16, $17, $18, $19, $20, $21
+      )
+    `,
+    fields.map((field) => submission[field]),
+  );
 }
 
 async function getNextSheetNumber(sheets, tabName) {
