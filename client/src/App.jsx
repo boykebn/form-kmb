@@ -315,8 +315,8 @@ function AdminDataPage() {
     setEditingSubmission(null);
   }
 
-  function startEdit(submission) {
-    setEditingSubmission(submission);
+  function startEdit(submission, displayNo) {
+    setEditingSubmission({ ...submission, displayNo });
     setEditForm(buildEditForm(submission));
     setEditStatus("idle");
     setEditMessage("");
@@ -382,8 +382,8 @@ function AdminDataPage() {
     }
   }
 
-  function requestDelete(submission) {
-    setPendingDelete(submission);
+  function requestDelete(submission, displayNo) {
+    setPendingDelete({ ...submission, displayNo });
     setMessage("");
   }
 
@@ -420,7 +420,7 @@ function AdminDataPage() {
       showToast(
         "success",
         "Data dihapus",
-        `No ${submission.no} - ${submission.siteName} sudah dihapus.`,
+        `${submission.siteName} sudah dihapus.`,
       );
     } catch (error) {
       setMessage(error.message);
@@ -683,13 +683,20 @@ function AdminDataPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {paginatedSubmissions.map((submission) => (
+                  {paginatedSubmissions.map((submission, rowIndex) => {
+                    const displayNo = pageStart + rowIndex + 1;
+
+                    return (
                     <tr key={submission.no}>
                       {submissionTableColumns.map((column) => (
                         <td key={column.key}>
                           <SheetCell
                             column={column}
-                            value={submission[column.key]}
+                            value={
+                              column.key === "no"
+                                ? displayNo
+                                : submission[column.key]
+                            }
                           />
                         </td>
                       ))}
@@ -698,7 +705,7 @@ function AdminDataPage() {
                           <button
                             className="sheet-action-button"
                             type="button"
-                            onClick={() => startEdit(submission)}
+                            onClick={() => startEdit(submission, displayNo)}
                             disabled={deletingNo === submission.no}
                           >
                             Edit
@@ -706,7 +713,7 @@ function AdminDataPage() {
                           <button
                             className="sheet-action-button sheet-action-danger"
                             type="button"
-                            onClick={() => requestDelete(submission)}
+                            onClick={() => requestDelete(submission, displayNo)}
                             disabled={deletingNo === submission.no}
                           >
                             {deletingNo === submission.no ? "..." : "Hapus"}
@@ -714,7 +721,8 @@ function AdminDataPage() {
                         </div>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                   {status === "success" && filteredSubmissions.length === 0 && (
                     <tr>
                       <td
@@ -829,7 +837,7 @@ function AdminDataPage() {
           form={editForm}
           status={editStatus}
           message={editMessage}
-          submissionNo={editingSubmission.no}
+          submissionNo={editingSubmission.displayNo ?? editingSubmission.no}
           onChange={updateEditField}
           onClose={closeEdit}
           onSubmit={saveEdit}
@@ -1046,7 +1054,7 @@ function ConfirmDeleteModal({ submission, isDeleting, onCancel, onConfirm }) {
         </div>
         <div className="confirm-modal-body">
           <p>
-            Data <strong>No {submission.no}</strong>
+            Data <strong>No {submission.displayNo ?? submission.no}</strong>
             {submission.siteName ? ` - ${submission.siteName}` : ""} akan
             dihapus dari database.
           </p>
