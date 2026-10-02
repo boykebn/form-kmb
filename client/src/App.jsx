@@ -5,6 +5,7 @@ const jakartaCenter = { lat: -6.2088, lng: 106.8456 };
 let googleMapsPromise;
 
 const initialForm = {
+  jenis: "BSS",
   agentPic: "",
   noTelpAgent: "",
   namaLokasi: "",
@@ -19,6 +20,103 @@ const initialForm = {
   slotBss: "",
   fotoLokasi: "",
 };
+
+const editableSubmissionFields = [
+  { key: "siteName", label: "Site Name", required: true },
+  { key: "address", label: "Address", type: "textarea", required: true },
+  { key: "googleMapUrl", label: "Google Map URL", required: true },
+  { key: "city", label: "City", required: true },
+  { key: "province", label: "Province", required: true },
+  { key: "rentalPrice", label: "Rental Price" },
+  {
+    key: "jenis",
+    label: "Jenis",
+    type: "select",
+    options: ["BSS", "EVCS"],
+    required: true,
+  },
+  {
+    key: "slot",
+    label: "Slot / Jumlah EVCS",
+    type: "select",
+    options: ["6", "12", "1", "2"],
+    required: true,
+  },
+  { key: "venuePic", label: "Venue PIC", required: true },
+  { key: "accountNumber", label: "Account Number", required: true },
+  { key: "rentPeriod", label: "Rent Period" },
+  { key: "keyAccount", label: "Key Account", required: true },
+  { key: "noTelpLokasi", label: "No. Telp Lokasi", required: true },
+  {
+    key: "approval",
+    label: "Approval",
+    type: "select",
+    options: ["pending", "approved", "rejected", "follow_up"],
+  },
+  { key: "awalKontrak", label: "Awal Kontrak", type: "date" },
+  { key: "akhirKontrak", label: "Akhir Kontrak", type: "date" },
+  { key: "masaKontrak", label: "Masa Kontrak" },
+  { key: "terminPembayaran", label: "Termin Pembayaran" },
+];
+
+const editFieldGroups = [
+  {
+    title: "Informasi Lokasi",
+    fields: [
+      "siteName",
+      "address",
+      "googleMapUrl",
+      "city",
+      "province",
+      "rentalPrice",
+      "jenis",
+      "slot",
+    ],
+  },
+  {
+    title: "PIC & Kontak",
+    fields: [
+      "venuePic",
+      "accountNumber",
+      "rentPeriod",
+      "keyAccount",
+      "noTelpLokasi",
+    ],
+  },
+  {
+    title: "Approval & Kontrak",
+    fields: [
+      "approval",
+      "awalKontrak",
+      "akhirKontrak",
+      "masaKontrak",
+      "terminPembayaran",
+    ],
+  },
+];
+
+const submissionTableColumns = [
+  { key: "no", label: "No" },
+  { key: "siteName", label: "Site Name" },
+  { key: "address", label: "Address" },
+  { key: "googleMapUrl", label: "Google Map URL", type: "link" },
+  { key: "city", label: "City" },
+  { key: "province", label: "Province" },
+  { key: "rentalPrice", label: "Rental Price" },
+  { key: "jenis", label: "Jenis" },
+  { key: "slot", label: "Slot / Jumlah EVCS" },
+  { key: "venuePic", label: "Venue PIC" },
+  { key: "accountNumber", label: "Account Number" },
+  { key: "rentPeriod", label: "Rent Period" },
+  { key: "keyAccount", label: "Key Account" },
+  { key: "noTelpLokasi", label: "No. Telp Lokasi" },
+  { key: "fotoLokasi", label: "Foto Lokasi", type: "photos" },
+  { key: "approval", label: "Approval", type: "approval" },
+  { key: "awalKontrak", label: "Awal Kontrak" },
+  { key: "akhirKontrak", label: "Akhir Kontrak" },
+  { key: "masaKontrak", label: "Masa Kontrak" },
+  { key: "terminPembayaran", label: "Termin Pembayaran" },
+];
 
 function App() {
   const [path, setPath] = useState(window.location.pathname);
@@ -35,11 +133,14 @@ function App() {
         ? "Form Pendaftaran BSS"
         : path === "/program-bss"
           ? "Program BSS"
-        : "PT. Kreasi Mitra Berdikari";
+          : path === "/admin-data"
+            ? "Data Pendaftaran BSS"
+            : "PT. Kreasi Mitra Berdikari";
   }, [path]);
 
   if (path === "/form-bss") return <FormPage />;
   if (path === "/program-bss") return <ProgramBssPage />;
+  if (path === "/admin-data") return <AdminDataPage />;
 
   return (
     <>
@@ -49,13 +150,907 @@ function App() {
   );
 }
 
+function AdminDataPage() {
+  const importInputRef = useRef(null);
+  const [adminToken, setAdminToken] = useState(
+    () => sessionStorage.getItem("kmbAdminToken") || "",
+  );
+  const [password, setPassword] = useState("");
+  const [submissions, setSubmissions] = useState([]);
+  const [status, setStatus] = useState(adminToken ? "loading" : "locked");
+  const [message, setMessage] = useState("");
+  const [editingSubmission, setEditingSubmission] = useState(null);
+  const [editForm, setEditForm] = useState({});
+  const [editStatus, setEditStatus] = useState("idle");
+  const [editMessage, setEditMessage] = useState("");
+  const [deletingNo, setDeletingNo] = useState(null);
+  const [importStatus, setImportStatus] = useState("idle");
+  const [exportStatus, setExportStatus] = useState("idle");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+
+  const dashboardStats = buildDashboardStats(submissions);
+  const filteredSubmissions = submissions.filter((submission) => {
+    const approval = normalizeApprovalStatus(submission.approval);
+    const matchesStatus = statusFilter === "all" || approval === statusFilter;
+    const query = searchQuery.trim().toLowerCase();
+    const matchesSearch =
+      !query ||
+      [
+        submission.no,
+        submission.siteName,
+        submission.address,
+        submission.googleMapUrl,
+        submission.city,
+        submission.province,
+        submission.rentalPrice,
+        submission.jenis,
+        submission.slot,
+        submission.venuePic,
+        submission.accountNumber,
+        submission.rentPeriod,
+        submission.keyAccount,
+        submission.noTelpLokasi,
+        submission.awalKontrak,
+        submission.akhirKontrak,
+        submission.masaKontrak,
+        submission.terminPembayaran,
+      ]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query));
+
+    return matchesStatus && matchesSearch;
+  });
+  const totalPages = Math.max(
+    1,
+    Math.ceil(filteredSubmissions.length / pageSize),
+  );
+  const currentPage = Math.min(page, totalPages);
+  const pageStart = (currentPage - 1) * pageSize;
+  const paginatedSubmissions = filteredSubmissions.slice(
+    pageStart,
+    pageStart + pageSize,
+  );
+  const visibleStart = filteredSubmissions.length === 0 ? 0 : pageStart + 1;
+  const visibleEnd = Math.min(pageStart + pageSize, filteredSubmissions.length);
+  const paginationItems = buildPaginationItems(currentPage, totalPages);
+
+  useEffect(() => {
+    if (!adminToken) return;
+
+    let disposed = false;
+
+    fetch("/api/submissions", {
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+      },
+    })
+      .then(async (response) => {
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.message || "Data belum bisa dimuat.");
+        }
+        return result;
+      })
+      .then((result) => {
+        if (disposed) return;
+        setSubmissions(result.submissions || []);
+        setStatus("success");
+      })
+      .catch((error) => {
+        if (disposed) return;
+        if (error.message.includes("admin")) {
+          sessionStorage.removeItem("kmbAdminToken");
+          setAdminToken("");
+          setStatus("locked");
+        } else {
+          setStatus("error");
+        }
+        setMessage(error.message);
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [adminToken]);
+
+  async function handleAdminLogin(event) {
+    event.preventDefault();
+    setStatus("loading");
+    setMessage("");
+
+    try {
+      const response = await fetch("/api/admin/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.message || "Login admin gagal.");
+      }
+
+      sessionStorage.setItem("kmbAdminToken", result.token);
+      setStatus("loading");
+      setAdminToken(result.token);
+      setPassword("");
+    } catch (error) {
+      setStatus("locked");
+      setMessage(error.message);
+    }
+  }
+
+  function handleLogout() {
+    sessionStorage.removeItem("kmbAdminToken");
+    setAdminToken("");
+    setSubmissions([]);
+    setStatus("locked");
+    setMessage("");
+    setEditingSubmission(null);
+  }
+
+  function startEdit(submission) {
+    setEditingSubmission(submission);
+    setEditForm(buildEditForm(submission));
+    setEditStatus("idle");
+    setEditMessage("");
+  }
+
+  function closeEdit() {
+    if (editStatus === "loading") return;
+    setEditingSubmission(null);
+    setEditForm({});
+    setEditMessage("");
+  }
+
+  function updateEditField(event) {
+    const { name, value } = event.target;
+    setEditForm((current) => ({
+      ...current,
+      [name]: value,
+      ...(name === "jenis" ? { slot: "" } : {}),
+    }));
+  }
+
+  async function saveEdit(event) {
+    event.preventDefault();
+    if (!editingSubmission) return;
+
+    setEditStatus("loading");
+    setEditMessage("");
+
+    try {
+      const response = await fetch(`/api/submissions/${editingSubmission.no}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify(editForm),
+      });
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.message || "Data belum bisa disimpan.");
+      }
+
+      setSubmissions((current) =>
+        current.map((submission) =>
+          submission.no === result.submission.no
+            ? result.submission
+            : submission,
+        ),
+      );
+      setEditingSubmission(null);
+      setEditForm({});
+      setEditStatus("idle");
+    } catch (error) {
+      setEditStatus("error");
+      setEditMessage(error.message);
+    }
+  }
+
+  async function deleteData(submission) {
+    const confirmed = window.confirm(
+      `Hapus data No ${submission.no} - ${submission.siteName}?`,
+    );
+
+    if (!confirmed) return;
+
+    setDeletingNo(submission.no);
+    setMessage("");
+
+    try {
+      const response = await fetch(`/api/submissions/${submission.no}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+        },
+      });
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.message || "Data belum bisa dihapus.");
+      }
+
+      setSubmissions((current) =>
+        current.filter((item) => Number(item.no) !== Number(submission.no)),
+      );
+    } catch (error) {
+      setMessage(error.message);
+      setStatus("error");
+    } finally {
+      setDeletingNo(null);
+    }
+  }
+
+  async function importFile(file) {
+    if (!file) return;
+
+    setImportStatus("loading");
+    setMessage("");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch("/api/submissions/import-file", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: formData,
+      });
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.message || "Import belum bisa dijalankan.");
+      }
+
+      setSubmissions(result.submissions || []);
+      setStatus("success");
+      setPage(1);
+      setMessage(result.message);
+      setImportStatus("success");
+    } catch (error) {
+      setMessage(error.message);
+      setStatus("error");
+      setImportStatus("error");
+    } finally {
+      if (importInputRef.current) {
+        importInputRef.current.value = "";
+      }
+    }
+  }
+
+  async function exportCsv() {
+    setExportStatus("loading");
+    setMessage("");
+
+    try {
+      const response = await fetch("/api/submissions/export.csv", {
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+        },
+      });
+
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.message || "Export belum bisa dijalankan.");
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `data-pendaftaran-bss-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setExportStatus("success");
+    } catch (error) {
+      setMessage(error.message);
+      setStatus("error");
+      setExportStatus("error");
+    }
+  }
+
+  function updateSearchQuery(value) {
+    setSearchQuery(value);
+    setPage(1);
+  }
+
+  function updateStatusFilter(value) {
+    setStatusFilter(value);
+    setPage(1);
+  }
+
+  function updatePageSize(value) {
+    setPageSize(Number(value));
+    setPage(1);
+  }
+
+  return (
+    <main className="admin-page">
+      <header className="admin-header">
+        <div>
+          <a className="back-link" href="/">
+            Kembali ke profil perusahaan
+          </a>
+          <p className="company-kicker">Data Internal</p>
+          <h1>Data Pendaftaran BSS</h1>
+        </div>
+        <div className="admin-summary">
+          <span>{adminToken ? "Total Baris" : "Status"}</span>
+          <strong>{adminToken ? submissions.length : "Locked"}</strong>
+        </div>
+      </header>
+
+      {!adminToken && (
+        <section className="admin-login-panel">
+          <form onSubmit={handleAdminLogin}>
+            <div>
+              <span>Akses Admin</span>
+              <h2>Masukkan password untuk membuka data internal.</h2>
+            </div>
+            <label>
+              <span>Password Admin</span>
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="Password admin"
+                required
+              />
+            </label>
+            <button type="submit" disabled={status === "loading"}>
+              {status === "loading" ? "Memeriksa..." : "Masuk"}
+            </button>
+            {message && <p className="status error">{message}</p>}
+          </form>
+        </section>
+      )}
+
+      {adminToken && (
+        <section className="dashboard-shell">
+          <div className="dashboard-toolbar">
+            <div>
+              <strong>Dashboard BSS</strong>
+              <span>
+                {status === "loading"
+                  ? "Memuat data..."
+                  : status === "error"
+                    ? message
+                    : `${filteredSubmissions.length} dari ${submissions.length} data ditampilkan`}
+              </span>
+            </div>
+            <div className="dashboard-toolbar-actions">
+              <input
+                ref={importInputRef}
+                className="visually-hidden-input"
+                type="file"
+                accept=".csv,.tsv,text/csv,text/tab-separated-values"
+                onChange={(event) => importFile(event.target.files?.[0])}
+              />
+              <button
+                type="button"
+                onClick={() => importInputRef.current?.click()}
+                disabled={importStatus === "loading"}
+              >
+                {importStatus === "loading" ? "Import..." : "Import File"}
+              </button>
+              <button
+                type="button"
+                onClick={exportCsv}
+                disabled={exportStatus === "loading"}
+              >
+                {exportStatus === "loading" ? "Export..." : "Export CSV"}
+              </button>
+              <button type="button" onClick={handleLogout}>
+                Keluar
+              </button>
+            </div>
+          </div>
+          {message && (
+            <p
+              className={`dashboard-notice ${status === "error" ? "error" : "success"}`}
+            >
+              {message}
+            </p>
+          )}
+
+          <section
+            className="dashboard-metrics"
+            aria-label="Ringkasan data BSS"
+          >
+            <article>
+              <span>Total</span>
+              <strong>{dashboardStats.total}</strong>
+              <p>Semua lokasi</p>
+            </article>
+            <article>
+              <span>Pending</span>
+              <strong>{dashboardStats.pending}</strong>
+              <p>Menunggu review</p>
+            </article>
+            <article>
+              <span>Approved</span>
+              <strong>{dashboardStats.approved}</strong>
+              <p>Lokasi disetujui</p>
+            </article>
+            <article>
+              <span>12 Slot</span>
+              <strong>{dashboardStats.slot12}</strong>
+              <p>Kapasitas besar</p>
+            </article>
+          </section>
+
+          <section className="dashboard-controls">
+            <label>
+              <span>Cari data</span>
+              <input
+                value={searchQuery}
+                onChange={(event) => updateSearchQuery(event.target.value)}
+                placeholder="Cari lokasi, kota, PIC, atau nomor telepon"
+              />
+            </label>
+            <label>
+              <span>Status approval</span>
+              <select
+                value={statusFilter}
+                onChange={(event) => updateStatusFilter(event.target.value)}
+              >
+                <option value="all">Semua status</option>
+                <option value="pending">Pending</option>
+                <option value="approved">Approved</option>
+                <option value="rejected">Rejected</option>
+                <option value="follow_up">Follow up</option>
+              </select>
+            </label>
+          </section>
+
+          <section className="dashboard-table-panel">
+            <div className="dashboard-table-header">
+              <span>
+                {visibleStart}-{visibleEnd} dari {filteredSubmissions.length}{" "}
+                baris
+              </span>
+            </div>
+            <div className="dashboard-table-scroll">
+              <table className="dashboard-table">
+                <thead>
+                  <tr>
+                    {submissionTableColumns.map((column) => (
+                      <th key={column.key}>{column.label}</th>
+                    ))}
+                    <th>Aksi</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paginatedSubmissions.map((submission) => (
+                    <tr key={submission.no}>
+                      {submissionTableColumns.map((column) => (
+                        <td key={column.key}>
+                          <SheetCell
+                            column={column}
+                            value={submission[column.key]}
+                          />
+                        </td>
+                      ))}
+                      <td>
+                        <div className="sheet-action-group">
+                          <button
+                            className="sheet-action-button"
+                            type="button"
+                            onClick={() => startEdit(submission)}
+                            disabled={deletingNo === submission.no}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            className="sheet-action-button sheet-action-danger"
+                            type="button"
+                            onClick={() => deleteData(submission)}
+                            disabled={deletingNo === submission.no}
+                          >
+                            {deletingNo === submission.no ? "..." : "Hapus"}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {status === "success" && filteredSubmissions.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={submissionTableColumns.length + 1}
+                        className="sheet-empty"
+                      >
+                        Data tidak ditemukan.
+                      </td>
+                    </tr>
+                  )}
+                  {status === "loading" && (
+                    <tr>
+                      <td
+                        colSpan={submissionTableColumns.length + 1}
+                        className="sheet-empty"
+                      >
+                        Memuat data...
+                      </td>
+                    </tr>
+                  )}
+                  {status === "error" && (
+                    <tr>
+                      <td
+                        colSpan={submissionTableColumns.length + 1}
+                        className="sheet-empty sheet-error"
+                      >
+                        {message}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="dashboard-pagination">
+              <div className="pagination-size">
+                <span>Rows per page</span>
+                <select
+                  value={pageSize}
+                  onChange={(event) => updatePageSize(event.target.value)}
+                >
+                  <option value="10">10</option>
+                  <option value="15">15</option>
+                  <option value="25">25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+              </div>
+              <p className="pagination-range">
+                {visibleStart}-{visibleEnd} of {filteredSubmissions.length} rows
+              </p>
+              <div className="pagination-pages">
+                <button
+                  aria-label="Halaman pertama"
+                  type="button"
+                  onClick={() => setPage(1)}
+                  disabled={currentPage === 1}
+                >
+                  «
+                </button>
+                <button
+                  aria-label="Halaman sebelumnya"
+                  type="button"
+                  onClick={() => setPage((value) => Math.max(1, value - 1))}
+                  disabled={currentPage === 1}
+                >
+                  ‹
+                </button>
+                {paginationItems.map((item, index) =>
+                  item === "ellipsis" ? (
+                    <span
+                      className="pagination-ellipsis"
+                      key={`ellipsis-${index}`}
+                    >
+                      ...
+                    </span>
+                  ) : (
+                    <button
+                      className={item === currentPage ? "is-active" : ""}
+                      type="button"
+                      onClick={() => setPage(item)}
+                      key={item}
+                    >
+                      {item}
+                    </button>
+                  ),
+                )}
+                <button
+                  aria-label="Halaman berikutnya"
+                  type="button"
+                  onClick={() =>
+                    setPage((value) => Math.min(totalPages, value + 1))
+                  }
+                  disabled={currentPage === totalPages}
+                >
+                  ›
+                </button>
+                <button
+                  aria-label="Halaman terakhir"
+                  type="button"
+                  onClick={() => setPage(totalPages)}
+                  disabled={currentPage === totalPages}
+                >
+                  »
+                </button>
+              </div>
+            </div>
+          </section>
+        </section>
+      )}
+      {editingSubmission && (
+        <EditSubmissionModal
+          form={editForm}
+          status={editStatus}
+          message={editMessage}
+          submissionNo={editingSubmission.no}
+          onChange={updateEditField}
+          onClose={closeEdit}
+          onSubmit={saveEdit}
+        />
+      )}
+    </main>
+  );
+}
+
+function buildEditForm(submission) {
+  return Object.fromEntries(
+    editableSubmissionFields.map((field) => [
+      field.key,
+      field.type === "date"
+        ? formatDateInput(submission[field.key])
+        : String(submission[field.key] ?? ""),
+    ]),
+  );
+}
+
+function getEditableField(fieldKey) {
+  return editableSubmissionFields.find((field) => field.key === fieldKey);
+}
+
+function buildPaginationItems(currentPage, totalPages) {
+  if (totalPages <= 5) {
+    return Array.from({ length: totalPages }, (_, index) => index + 1);
+  }
+
+  if (currentPage <= 3) {
+    return [1, 2, 3, "ellipsis", totalPages];
+  }
+
+  if (currentPage >= totalPages - 2) {
+    return [1, "ellipsis", totalPages - 2, totalPages - 1, totalPages];
+  }
+
+  return [1, "ellipsis", currentPage, "ellipsis", totalPages];
+}
+
+function formatSelectOption(fieldKey, option) {
+  if (fieldKey === "slot") {
+    if (option === "1" || option === "2") return `${option} EVCS`;
+    return `${option} Slot`;
+  }
+
+  if (option === "follow_up") return "Follow up";
+  return option;
+}
+
+function buildDashboardStats(submissions) {
+  return submissions.reduce(
+    (stats, submission) => {
+      const approval = normalizeApprovalStatus(submission.approval);
+      stats.total += 1;
+      if (approval === "pending") stats.pending += 1;
+      if (approval === "approved") stats.approved += 1;
+      if (approval === "rejected") stats.rejected += 1;
+      if (approval === "follow_up") stats.followUp += 1;
+      if (submission.jenis === "BSS" && Number(submission.slot) === 12) stats.slot12 += 1;
+      return stats;
+    },
+    {
+      total: 0,
+      pending: 0,
+      approved: 0,
+      rejected: 0,
+      followUp: 0,
+      slot12: 0,
+    },
+  );
+}
+
+function normalizeApprovalStatus(status) {
+  return String(status || "pending")
+    .trim()
+    .toLowerCase()
+    .replaceAll(" ", "_");
+}
+
+function formatApprovalStatus(status) {
+  const normalizedStatus = normalizeApprovalStatus(status);
+  if (normalizedStatus === "approved") return "Approved";
+  if (normalizedStatus === "rejected") return "Rejected";
+  if (normalizedStatus === "follow_up") return "Follow up";
+  return "Pending";
+}
+
+function EditSubmissionModal({
+  form,
+  status,
+  message,
+  submissionNo,
+  onChange,
+  onClose,
+  onSubmit,
+}) {
+  return (
+    <div className="edit-modal-backdrop" role="dialog" aria-modal="true">
+      <form className="edit-modal" onSubmit={onSubmit}>
+        <div className="edit-modal-header">
+          <div>
+            <span>Edit Data</span>
+            <h2>No {submissionNo}</h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={status === "loading"}
+          >
+            Tutup
+          </button>
+        </div>
+
+        <div className="edit-section-list">
+          {editFieldGroups.map((group) => (
+            <section className="edit-section" key={group.title}>
+              <h3>{group.title}</h3>
+              <div className="edit-field-grid">
+                {group.fields.map((fieldKey) => {
+                  const field = getEditableField(fieldKey);
+                  if (!field) return null;
+                  const options =
+                    field.key === "slot"
+                      ? form.jenis === "EVCS"
+                        ? ["1", "2"]
+                        : ["6", "12"]
+                      : field.options;
+
+                  return (
+                    <label
+                      key={field.key}
+                      className={
+                        field.type === "textarea" ? "edit-field-wide" : ""
+                      }
+                    >
+                      <span>
+                        {field.label}
+                        {field.required && <strong> *</strong>}
+                      </span>
+                      {field.type === "textarea" ? (
+                        <textarea
+                          name={field.key}
+                          value={form[field.key] || ""}
+                          onChange={onChange}
+                          rows="4"
+                          required={field.required}
+                        />
+                      ) : field.type === "select" ? (
+                        <select
+                          name={field.key}
+                          value={form[field.key] || ""}
+                          onChange={onChange}
+                          required={field.required}
+                        >
+                          <option value="">Pilih</option>
+                          {options.map((option) => (
+                            <option value={option} key={option}>
+                              {formatSelectOption(field.key, option)}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          name={field.key}
+                          type={field.type || "text"}
+                          value={form[field.key] || ""}
+                          onChange={onChange}
+                          required={field.required}
+                        />
+                      )}
+                    </label>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
+        </div>
+
+        <div className="edit-modal-actions">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={status === "loading"}
+          >
+            Batal
+          </button>
+          <button type="submit" disabled={status === "loading"}>
+            {status === "loading" ? "Menyimpan..." : "Simpan perubahan"}
+          </button>
+          {message && <p className="status error">{message}</p>}
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function SheetCell({ column, value }) {
+  if (column.type === "approval") {
+    const approval = normalizeApprovalStatus(value);
+    return (
+      <span className={`status-badge status-${approval}`}>
+        {formatApprovalStatus(value)}
+      </span>
+    );
+  }
+
+  if (column.type === "link" && value) {
+    return (
+      <a href={value} target="_blank" rel="noreferrer">
+        Buka link
+      </a>
+    );
+  }
+
+  if (column.type === "photos") {
+    const photos = Array.isArray(value) ? value : [];
+    if (!photos.length) return "";
+
+    return (
+      <div className="sheet-photo-links">
+        {photos.map((photo, index) => {
+          const url = typeof photo === "string" ? photo : photo.url;
+          const label =
+            typeof photo === "string"
+              ? `Foto ${index + 1}`
+              : formatPhotoType(photo.type, index);
+          return (
+            <a
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+              key={`${url}-${index}`}
+            >
+              {label}
+            </a>
+          );
+        })}
+      </div>
+    );
+  }
+
+  if (column.type === "datetime" && value) {
+    return new Intl.DateTimeFormat("id-ID", {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(new Date(value));
+  }
+
+  return value ?? "";
+}
+
+function formatDateInput(value) {
+  if (!value) return "";
+
+  return new Date(value).toISOString().slice(0, 10);
+}
+
+function formatPhotoType(type, index) {
+  if (type === "front_business") return "Tampak depan";
+  if (type === "distance_to_power_pole") return "Jarak tiang";
+  if (type === "inside_to_road") return "Dari dalam";
+  return `Foto ${index + 1}`;
+}
+
 function ScrollToTopButton() {
   const [isVisible, setIsVisible] = useState(false);
 
   useEffect(() => {
     function updateVisibility() {
       const scrollPosition = window.scrollY + window.innerHeight;
-      const bottomDistance = document.documentElement.scrollHeight - scrollPosition;
+      const bottomDistance =
+        document.documentElement.scrollHeight - scrollPosition;
       setIsVisible(window.scrollY > 520 && bottomDistance < 520);
     }
 
@@ -133,9 +1128,9 @@ function CompanyProfile() {
             <p className="company-kicker">PT. Kreasi Mitra Berdikari</p>
             <h1>Mitra bisnis untuk eksekusi lapangan yang terukur.</h1>
             <p>
-              Kami mendukung pengembangan kemitraan, verifikasi lokasi,
-              aktivasi operasional, dan kebutuhan penunjang usaha dengan
-              pendekatan yang rapi, responsif, dan berbasis data lapangan.
+              Kami mendukung pengembangan kemitraan, verifikasi lokasi, aktivasi
+              operasional, dan kebutuhan penunjang usaha dengan pendekatan yang
+              rapi, responsif, dan berbasis data lapangan.
             </p>
             <div className="company-actions">
               <a className="company-primary-button" href="/form-bss">
@@ -230,13 +1225,17 @@ function CompanyProfile() {
       <section className="company-section workflow-section">
         <div className="company-section-heading">
           <span>Cara Kerja</span>
-          <h2>Proses sederhana untuk menjaga data dan koordinasi tetap rapi.</h2>
+          <h2>
+            Proses sederhana untuk menjaga data dan koordinasi tetap rapi.
+          </h2>
         </div>
         <div className="workflow-grid">
           <article>
             <span>01</span>
             <h3>Identifikasi</h3>
-            <p>Memetakan kebutuhan program, area prioritas, dan profil lokasi.</p>
+            <p>
+              Memetakan kebutuhan program, area prioritas, dan profil lokasi.
+            </p>
           </article>
           <article>
             <span>02</span>
@@ -246,7 +1245,9 @@ function CompanyProfile() {
           <article>
             <span>03</span>
             <h3>Koordinasi</h3>
-            <p>Menyusun data untuk tindak lanjut mitra dan kebutuhan operasional.</p>
+            <p>
+              Menyusun data untuk tindak lanjut mitra dan kebutuhan operasional.
+            </p>
           </article>
         </div>
       </section>
@@ -261,7 +1262,11 @@ function CompanyProfile() {
             {galleryImages.slice(0, 6).map((image, index) => (
               <button
                 type="button"
-                className={index === 0 ? "gallery-item gallery-item-large" : "gallery-item"}
+                className={
+                  index === 0
+                    ? "gallery-item gallery-item-large"
+                    : "gallery-item"
+                }
                 key={image.id}
                 onClick={() => setPreviewImage(image)}
               >
@@ -309,7 +1314,9 @@ function CompanyProfile() {
         </div>
         <div className="bss-band-actions">
           <a href="/program-bss">Pelajari Program</a>
-          <a className="bss-band-secondary" href="/form-bss">Buka Form BSS</a>
+          <a className="bss-band-secondary" href="/form-bss">
+            Buka Form BSS
+          </a>
         </div>
       </section>
 
@@ -330,9 +1337,7 @@ function CompanyProfile() {
         </div>
         <div className="company-footer-col">
           <span>Kontak</span>
-          <a href="mailto:contact@kmbgroup.id">
-            contact@kmbgroup.id
-          </a>
+          <a href="mailto:contact@kmbgroup.id">contact@kmbgroup.id</a>
           {/* <a href="tel:082112941420">082112941420</a> */}
         </div>
         <div className="company-footer-col">
@@ -409,7 +1414,10 @@ function ProgramBssPage() {
       <section className="company-section program-split-section">
         <div className="company-section-heading">
           <span>Pengenalan</span>
-          <h2>BSS dirancang untuk mempercepat mobilitas kendaraan listrik roda dua.</h2>
+          <h2>
+            BSS dirancang untuk mempercepat mobilitas kendaraan listrik roda
+            dua.
+          </h2>
         </div>
         <div className="program-copy-card">
           <p>
@@ -427,7 +1435,9 @@ function ProgramBssPage() {
       <section className="company-section">
         <div className="company-section-heading">
           <span>Spesifikasi</span>
-          <h2>Pilihan perangkat menyesuaikan kapasitas dan kesiapan daya lokasi.</h2>
+          <h2>
+            Pilihan perangkat menyesuaikan kapasitas dan kesiapan daya lokasi.
+          </h2>
         </div>
         <div className="spec-grid">
           <article>
@@ -438,12 +1448,16 @@ function ProgramBssPage() {
           <article>
             <span>12 Slot</span>
             <h3>1 Fase</h3>
-            <p>Arus 63A, daya PLN 13.9 kVA, dimensi rak 1060 x 605 x 1900 mm.</p>
+            <p>
+              Arus 63A, daya PLN 13.9 kVA, dimensi rak 1060 x 605 x 1900 mm.
+            </p>
           </article>
           <article>
             <span>12 Slot</span>
             <h3>3 Fase</h3>
-            <p>Arus 25A, daya PLN 16.5 kVA, dimensi rak 1060 x 605 x 1900 mm.</p>
+            <p>
+              Arus 25A, daya PLN 16.5 kVA, dimensi rak 1060 x 605 x 1900 mm.
+            </p>
           </article>
         </div>
       </section>
@@ -451,10 +1465,14 @@ function ProgramBssPage() {
       <section className="company-section safety-section">
         <div className="company-section-heading">
           <span>Keselamatan</span>
-          <h2>Standar perangkat mendukung keamanan instalasi dan operasional.</h2>
+          <h2>
+            Standar perangkat mendukung keamanan instalasi dan operasional.
+          </h2>
         </div>
         <div className="safety-list">
-          <p>Grounding dan isolasi penuh sesuai standar keselamatan IEC & PLN.</p>
+          <p>
+            Grounding dan isolasi penuh sesuai standar keselamatan IEC & PLN.
+          </p>
           <p>Proteksi kebocoran tipe B dan enclosure tahan api.</p>
           <p>Struktur tahan cuaca, tahan korosi, dan aman terhadap petir.</p>
         </div>
@@ -463,7 +1481,10 @@ function ProgramBssPage() {
       <section className="company-section cooperation-section">
         <div className="company-section-heading">
           <span>Skema Kerja Sama</span>
-          <h2>Pemilik lahan fokus menyediakan lokasi, kebutuhan teknis ditangani mitra operasional.</h2>
+          <h2>
+            Pemilik lahan fokus menyediakan lokasi, kebutuhan teknis ditangani
+            mitra operasional.
+          </h2>
         </div>
         <div className="cooperation-grid">
           <article>
@@ -513,7 +1534,9 @@ function ProgramBssPage() {
       <section className="company-section bss-band">
         <div>
           <span>Ajukan Lokasi</span>
-          <h2>Siapkan data lokasi, titik peta, dan dokumentasi foto lapangan.</h2>
+          <h2>
+            Siapkan data lokasi, titik peta, dan dokumentasi foto lapangan.
+          </h2>
           <p>
             Form BSS membantu proses validasi awal agar data kandidat lokasi
             tersusun lengkap sebelum masuk tahap tindak lanjut.
@@ -541,9 +1564,7 @@ function ProgramBssPage() {
         </div>
         <div className="company-footer-col">
           <span>Kontak</span>
-          <a href="mailto:contact@kmbgroup.id">
-            contact@kmbgroup.id
-          </a>
+          <a href="mailto:contact@kmbgroup.id">contact@kmbgroup.id</a>
           {/* <a href="tel:082112941420">082112941420</a> */}
         </div>
       </footer>
@@ -559,7 +1580,11 @@ function FormPage() {
 
   function updateField(event) {
     const { name, value } = event.target;
-    setForm((current) => ({ ...current, [name]: value }));
+    setForm((current) => ({
+      ...current,
+      [name]: value,
+      ...(name === "jenis" ? { slotBss: "" } : {}),
+    }));
   }
 
   function updateFile(event) {
@@ -830,14 +1855,28 @@ function FormPage() {
             <span>03</span>
             <div>
               <h2>Kapasitas</h2>
-              <p>Slot BSS dan dokumentasi lokasi.</p>
+              <p>Jenis perangkat, kapasitas, dan dokumentasi lokasi.</p>
             </div>
           </div>
 
           <div className="capacity-grid">
             <label className="slot-field">
               <span>
-                Slot BSS <strong>*</strong>
+                Jenis <strong>*</strong>
+              </span>
+              <select
+                name="jenis"
+                value={form.jenis}
+                onChange={updateField}
+                required
+              >
+                <option value="BSS">BSS</option>
+                <option value="EVCS">EVCS</option>
+              </select>
+            </label>
+            <label className="slot-field">
+              <span>
+                {form.jenis === "EVCS" ? "Jumlah EVCS" : "Slot BSS"} <strong>*</strong>
               </span>
               <select
                 name="slotBss"
@@ -845,9 +1884,20 @@ function FormPage() {
                 onChange={updateField}
                 required
               >
-                <option value="">Pilih slot</option>
-                <option value="6">6 Slot</option>
-                <option value="12">12 Slot</option>
+                <option value="">
+                  {form.jenis === "EVCS" ? "Pilih jumlah EVCS" : "Pilih slot"}
+                </option>
+                {form.jenis === "EVCS" ? (
+                  <>
+                    <option value="1">1 EVCS</option>
+                    <option value="2">2 EVCS</option>
+                  </>
+                ) : (
+                  <>
+                    <option value="6">6 Slot</option>
+                    <option value="12">12 Slot</option>
+                  </>
+                )}
               </select>
             </label>
             <label className="photo-field">
@@ -1018,21 +2068,38 @@ function MapPicker({ value, onLocationChange }) {
     )
       return;
 
+    setLocationMessage("");
     setMapState("searching");
-    geocoderRef.current.geocode({ address: searchQuery }, (results, status) => {
-      if (status !== "OK" || !results?.[0]?.geometry?.location) {
-        setMapState("ready");
-        return;
-      }
-
-      const place = results[0];
-      const latLng = place.geometry.location;
-      markerRef.current.setPosition(latLng);
-      mapInstanceRef.current.panTo(latLng);
-      mapInstanceRef.current.setZoom(16);
-      onLocationChange(buildLocationPayload(latLng, place));
+    const timeoutId = window.setTimeout(() => {
+      setLocationMessage("Pencarian lokasi terlalu lama. Coba kata kunci lain.");
       setMapState("ready");
-    });
+    }, 12000);
+
+    geocoderRef.current.geocode(
+      {
+        address: searchQuery,
+        componentRestrictions: { country: "ID" },
+        region: "id",
+      },
+      (results, status) => {
+        window.clearTimeout(timeoutId);
+        if (status !== "OK" || !results?.[0]?.geometry?.location) {
+          setLocationMessage(
+            "Lokasi tidak ditemukan. Coba nama tempat atau alamat yang lebih lengkap.",
+          );
+          setMapState("ready");
+          return;
+        }
+
+        const place = results[0];
+        const latLng = place.geometry.location;
+        markerRef.current.setPosition(latLng);
+        mapInstanceRef.current.panTo(latLng);
+        mapInstanceRef.current.setZoom(16);
+        onLocationChange(buildLocationPayload(latLng, place));
+        setMapState("ready");
+      },
+    );
   }
 
   function useCurrentLocation() {
@@ -1062,12 +2129,22 @@ function MapPicker({ value, onLocationChange }) {
         onLocationChange(location);
 
         if (geocoderRef.current) {
+          const timeoutId = window.setTimeout(() => {
+            setLocationMessage("Alamat dari lokasi Anda belum bisa dibaca.");
+            setMapState("ready");
+          }, 12000);
+
           geocoderRef.current.geocode(
             { location: latLng },
             (results, status) => {
+              window.clearTimeout(timeoutId);
               if (status === "OK" && results?.[0]) {
                 onLocationChange(buildLocationPayload(latLng, results[0]));
                 setSearchQuery(results[0].formatted_address || "");
+              } else {
+                setLocationMessage(
+                  "Titik lokasi didapat, tapi alamat lengkap belum ditemukan.",
+                );
               }
               setMapState("ready");
             },
@@ -1178,6 +2255,11 @@ function loadGoogleMaps() {
 
       const existingScript = document.querySelector("script[data-google-maps]");
       if (existingScript) {
+        if (window.google?.maps?.places) {
+          resolve();
+          return;
+        }
+
         existingScript.addEventListener("load", resolve, { once: true });
         existingScript.addEventListener("error", reject, { once: true });
         return;
@@ -1188,7 +2270,10 @@ function loadGoogleMaps() {
       script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places&v=weekly`;
       script.async = true;
       script.defer = true;
-      script.onload = resolve;
+      script.onload = () => {
+        script.dataset.loaded = "true";
+        resolve();
+      };
       script.onerror = reject;
       document.head.appendChild(script);
     });

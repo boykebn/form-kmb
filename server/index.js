@@ -4,9 +4,11 @@ import "dotenv/config";
 import express from "express";
 import { google } from "googleapis";
 import multer from "multer";
+import crypto from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import pg from "pg";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
@@ -22,6 +24,7 @@ const csvPath = path.join(dataDir, "submissions.csv");
 const app = express();
 const port = Number(process.env.PORT || 4444);
 const allowedOrigin = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+let databasePool;
 
 const fields = [
   "no",
@@ -30,9 +33,8 @@ const fields = [
   "googleMapUrl",
   "city",
   "province",
-  "district",
-  "subdistrict",
   "rentalPrice",
+  "jenis",
   "slot",
   "venuePic",
   "accountNumber",
@@ -54,10 +56,9 @@ const sheetHeaders = [
   "Google Map URL",
   "City",
   "Province",
-  "District",
-  "Subdistrict",
   "Rental Price",
-  "Slot",
+  "Jenis",
+  "Slot / Jumlah EVCS",
   "Venue PIC",
   "Account Number",
   "Rent Period",
@@ -72,6 +73,31 @@ const sheetHeaders = [
 ];
 
 const sheetHeaderFields = new Map(sheetHeaders.map((header, index) => [header, fields[index]]));
+const legacySheetHeaders = sheetHeaders
+  .filter((header) => header !== "Jenis")
+  .map((header) => (header === "Slot / Jumlah EVCS" ? "Slot" : header));
+const databaseColumns = [
+  "no",
+  "site_name",
+  "address",
+  "google_map_url",
+  "city",
+  "province",
+  "rental_price",
+  "jenis",
+  "slot",
+  "venue_pic",
+  "account_number",
+  "rent_period",
+  "key_account",
+  "no_telp_lokasi",
+  "foto_lokasi",
+  "approval",
+  "awal_kontrak",
+  "akhir_kontrak",
+  "masa_kontrak",
+  "termin_pembayaran",
+];
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -87,6 +113,13 @@ const upload = multer({
   },
 });
 
+const dataUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+  },
+});
+
 app.use(cors({ origin: allowedOrigin }));
 app.use(express.json({ limit: "1mb" }));
 app.use("/uploads", express.static(uploadDir));
@@ -95,6 +128,7 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     storage: getStorageLabel(),
+    database: hasDatabaseConfig(),
   });
 });
 
@@ -102,6 +136,160 @@ app.get("/api/gallery/bss", async (_req, res, next) => {
   try {
     const images = hasCloudinaryConfig() ? await listBssGalleryImages() : [];
     res.json({ images });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/login", (req, res) => {
+  const password = clean(req.body?.password);
+
+  if (!process.env.ADMIN_PASSWORD) {
+    return res
+      .status(503)
+      .json({ message: "Password admin belum dikonfigurasi." });
+  }
+
+  if (password !== process.env.ADMIN_PASSWORD) {
+    return res.status(401).json({ message: "Password admin salah." });
+  }
+
+  res.json({ token: createAdminToken() });
+});
+
+app.get("/api/submissions", requireAdmin, async (_req, res, next) => {
+  try {
+    const submissions = await listSubmissions();
+    res.json({ submissions });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/submissions/:no", requireAdmin, async (req, res, next) => {
+  try {
+    const submissionNo = Number(req.params.no);
+
+    if (!Number.isInteger(submissionNo) || submissionNo < 1) {
+      return res.status(400).json({ message: "Nomor submission tidak valid." });
+    }
+
+    const updates = normalizeSubmissionUpdates(req.body);
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ message: "Tidak ada data yang diubah." });
+    }
+
+    const updatedSubmission = await updateSubmission(submissionNo, updates);
+
+    if (!updatedSubmission) {
+      return res.status(404).json({ message: "Data tidak ditemukan." });
+    }
+
+    res.json({
+      message: "Data berhasil diperbarui.",
+      submission: updatedSubmission,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/submissions/:no", requireAdmin, async (req, res, next) => {
+  try {
+    const submissionNo = Number(req.params.no);
+
+    if (!Number.isInteger(submissionNo) || submissionNo < 1) {
+      return res.status(400).json({ message: "Nomor submission tidak valid." });
+    }
+
+    const deleted = await deleteSubmission(submissionNo);
+
+    if (!deleted) {
+      return res.status(404).json({ message: "Data tidak ditemukan." });
+    }
+
+    res.json({ message: "Data berhasil dihapus." });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/submissions/import-sheets", requireAdmin, async (_req, res, next) => {
+  try {
+    if (!hasDatabaseConfig()) {
+      return res.status(503).json({ message: "Database belum dikonfigurasi." });
+    }
+
+    if (!hasSheetsConfig()) {
+      return res.status(503).json({ message: "Google Sheets belum dikonfigurasi." });
+    }
+
+    const importResult = await importGoogleSheetsToDatabase();
+    const submissions = await listSubmissions();
+
+    res.json({
+      message: `Import selesai. Masuk/update: ${importResult.imported}. Dilewati: ${importResult.skipped}.`,
+      ...importResult,
+      submissions,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post(
+  "/api/submissions/import-file",
+  requireAdmin,
+  dataUpload.single("file"),
+  async (req, res, next) => {
+    try {
+      if (!hasDatabaseConfig()) {
+        return res.status(503).json({ message: "Database belum dikonfigurasi." });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ message: "File import belum dipilih." });
+      }
+
+      const importResult = await importDataFileToDatabase(req.file);
+      const submissions = await listSubmissions();
+
+      res.json({
+        message: `Import selesai. Masuk/update: ${importResult.imported}. Dilewati: ${importResult.skipped}.`,
+        ...importResult,
+        submissions,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.get("/api/submissions/export.csv", requireAdmin, async (_req, res, next) => {
+  try {
+    const submissions = await listSubmissions();
+    const rows = [
+      sheetHeaders.map(escapeCsv).join(","),
+      ...submissions.map((submission) =>
+        fields
+          .map((field) =>
+            escapeCsv(
+              field === "fotoLokasi" && Array.isArray(submission[field])
+                ? submission[field].join("\n")
+                : submission[field],
+            ),
+          )
+          .join(","),
+      ),
+    ];
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="data-pendaftaran-bss-${new Date().toISOString().slice(0, 10)}.csv"`,
+    );
+    res.send(`\uFEFF${rows.join("\n")}\n`);
   } catch (error) {
     next(error);
   }
@@ -145,8 +333,8 @@ app.post("/api/submissions", async (req, res, next) => {
 
     const submission = await buildInternalSubmission(formData);
 
-    await saveLocal(submission);
-    await appendToGoogleSheets(submission);
+    await saveSubmission(submission);
+    await mirrorToGoogleSheets(submission);
 
     res
       .status(201)
@@ -198,6 +386,7 @@ function normalizeFormData(input = {}) {
     kecamatan: clean(input.kecamatan),
     kelurahan: clean(input.kelurahan),
     provinsi: clean(input.provinsi),
+    jenis: clean(input.jenis) || "BSS",
     slotBss: clean(input.slotBss),
     fotoLokasi: clean(input.fotoLokasi),
   };
@@ -243,8 +432,18 @@ function validateFormData(formData) {
     errors.push({ field: "kelurahan", message: "Kelurahan wajib diisi." });
   if (!formData.provinsi)
     errors.push({ field: "provinsi", message: "Provinsi wajib diisi." });
-  if (!["6", "12"].includes(formData.slotBss)) {
-    errors.push({ field: "slotBss", message: "Slot BSS wajib dipilih." });
+  const hasValidJenis = ["BSS", "EVCS"].includes(formData.jenis);
+  if (!hasValidJenis) {
+    errors.push({ field: "jenis", message: "Jenis wajib dipilih." });
+  }
+  if (!hasValidJenis || !isValidCapacity(formData.jenis, formData.slotBss)) {
+    errors.push({
+      field: "slotBss",
+      message:
+        formData.jenis === "EVCS"
+          ? "Jumlah EVCS wajib dipilih."
+          : "Slot BSS wajib dipilih.",
+    });
   }
   if (!formData.fotoLokasi) {
     errors.push({
@@ -256,8 +455,104 @@ function validateFormData(formData) {
   return errors;
 }
 
+function normalizeSubmissionUpdates(input = {}) {
+  const allowedFields = [
+    "siteName",
+    "address",
+    "googleMapUrl",
+    "city",
+    "province",
+    "rentalPrice",
+    "jenis",
+    "slot",
+    "venuePic",
+    "accountNumber",
+    "rentPeriod",
+    "keyAccount",
+    "noTelpLokasi",
+    "approval",
+    "awalKontrak",
+    "akhirKontrak",
+    "masaKontrak",
+    "terminPembayaran",
+  ];
+
+  return Object.fromEntries(
+    allowedFields
+      .filter((field) => Object.hasOwn(input, field))
+      .map((field) => [field, clean(input[field])]),
+  );
+}
+
 function clean(value) {
   return String(value ?? "").trim();
+}
+
+function requireAdmin(req, res, next) {
+  const authHeader = req.get("authorization") || "";
+  const token = authHeader.startsWith("Bearer ")
+    ? authHeader.slice("Bearer ".length)
+    : "";
+
+  if (!verifyAdminToken(token)) {
+    res.status(401).json({ message: "Akses admin diperlukan." });
+    return;
+  }
+
+  next();
+}
+
+function createAdminToken() {
+  const payload = {
+    role: "admin",
+    exp: Date.now() + 8 * 60 * 60 * 1000,
+  };
+  const encodedPayload = Buffer.from(JSON.stringify(payload)).toString(
+    "base64url",
+  );
+  const signature = signAdminPayload(encodedPayload);
+
+  return `${encodedPayload}.${signature}`;
+}
+
+function verifyAdminToken(token) {
+  const [encodedPayload, signature] = String(token || "").split(".");
+  if (!encodedPayload || !signature) return false;
+
+  const expectedSignature = signAdminPayload(encodedPayload);
+  if (!safeEqual(signature, expectedSignature)) return false;
+
+  try {
+    const payload = JSON.parse(
+      Buffer.from(encodedPayload, "base64url").toString("utf8"),
+    );
+    return payload.role === "admin" && Number(payload.exp) > Date.now();
+  } catch {
+    return false;
+  }
+}
+
+function signAdminPayload(encodedPayload) {
+  return crypto
+    .createHmac("sha256", getAdminSessionSecret())
+    .update(encodedPayload)
+    .digest("base64url");
+}
+
+function getAdminSessionSecret() {
+  return (
+    process.env.ADMIN_SESSION_SECRET ||
+    process.env.ADMIN_PASSWORD ||
+    "local-admin-session-secret"
+  );
+}
+
+function safeEqual(value, expectedValue) {
+  const valueBuffer = Buffer.from(String(value));
+  const expectedBuffer = Buffer.from(String(expectedValue));
+
+  if (valueBuffer.length !== expectedBuffer.length) return false;
+  return crypto.timingSafeEqual(valueBuffer, expectedBuffer);
 }
 
 async function ensureUploadDir(_req, _res, next) {
@@ -271,20 +566,19 @@ async function ensureUploadDir(_req, _res, next) {
 
 async function buildInternalSubmission(formData) {
   return {
-    no: await getNextLocalNumber(),
+    no: await getNextSubmissionNumber(),
     siteName: formData.namaLokasi,
     address: formData.alamat,
     googleMapUrl: formData.googleMapUrl,
     city: formData.kota,
     province: formData.provinsi,
-    district: formData.kecamatan,
-    subdistrict: formData.kelurahan,
     rentalPrice: "",
+    jenis: formData.jenis,
     slot: formData.slotBss,
-    venuePic: formData.agentPic || "KMB",
+    venuePic: formData.namaPenanggungJawabLokasi,
     accountNumber: formData.noTelpAgent,
     rentPeriod: "",
-    keyAccount: formData.namaPenanggungJawabLokasi,
+    keyAccount: formData.agentPic,
     noTelpLokasi: formData.noTelpLokasi,
     fotoLokasi: formData.fotoLokasi,
     approval: "",
@@ -295,9 +589,35 @@ async function buildInternalSubmission(formData) {
   };
 }
 
+async function getNextSubmissionNumber() {
+  if (hasDatabaseConfig()) {
+    return null;
+  }
+
+  return getNextLocalNumber();
+}
+
 async function getNextLocalNumber() {
   const existing = await readJsonArray(jsonPath);
   return existing.length + 1;
+}
+
+async function saveSubmission(submission) {
+  if (hasDatabaseConfig()) {
+    submission.no = await saveToDatabase(submission);
+    await saveLocalBackup(submission);
+    return;
+  }
+
+  await saveLocal(submission);
+}
+
+async function saveLocalBackup(submission) {
+  try {
+    await saveLocal(submission);
+  } catch (error) {
+    console.error("Gagal membuat backup lokal submission:", error);
+  }
 }
 
 async function saveLocal(submission) {
@@ -355,13 +675,22 @@ function hasCloudinaryConfig() {
   );
 }
 
+function hasDatabaseConfig() {
+  return Boolean(process.env.DATABASE_URL);
+}
+
 function getStorageLabel() {
   const fileStorage = hasCloudinaryConfig()
     ? "cloudinary"
     : hasDriveConfig()
       ? "google-drive"
       : "local";
-  return hasSheetsConfig() ? `${fileStorage}+google-sheets` : fileStorage;
+  const dataStorage = hasDatabaseConfig() ? "postgres" : "local";
+  const sheetsMirror =
+    process.env.GOOGLE_SHEETS_MIRROR === "true" && hasSheetsConfig()
+      ? "+google-sheets-mirror"
+      : "";
+  return `${fileStorage}+${dataStorage}${sheetsMirror}`;
 }
 
 function getGoogleAuth(scopes) {
@@ -398,11 +727,617 @@ async function appendToGoogleSheets(submission) {
   });
 }
 
+async function mirrorToGoogleSheets(submission) {
+  if (process.env.GOOGLE_SHEETS_MIRROR !== "true") return;
+
+  try {
+    await appendToGoogleSheets(submission);
+  } catch (error) {
+    console.error("Gagal mirror data ke Google Sheets:", error);
+  }
+}
+
+async function readRowsFromGoogleSheets() {
+  const auth = getGoogleAuth(["https://www.googleapis.com/auth/spreadsheets.readonly"]);
+  const sheets = google.sheets({ version: "v4", auth });
+  const tabName = process.env.GOOGLE_SHEETS_TAB || "db_registrasi";
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.GOOGLE_SHEETS_ID,
+    range: `${tabName}!A:T`,
+  });
+
+  const rows = response.data.values || [];
+  if (rows.length === 0) return [];
+
+  const firstRow = rows[0].map(clean);
+  const hasHeader = sheetHeaders.every((header, index) => firstRow[index] === header);
+  const hasLegacyHeader = legacySheetHeaders.every(
+    (header, index) => firstRow[index] === header,
+  );
+
+  return hasHeader || hasLegacyHeader ? rows.slice(1) : rows;
+}
+
+async function importGoogleSheetsToDatabase() {
+  const rows = await readRowsFromGoogleSheets();
+  return importRowsToDatabase(rows);
+}
+
+async function importDataFileToDatabase(file) {
+  const fileName = file.originalname.toLowerCase();
+
+  if (!fileName.endsWith(".csv") && !fileName.endsWith(".tsv")) {
+    throw new Error("Format import yang didukung saat ini CSV atau TSV.");
+  }
+
+  const text = file.buffer.toString("utf8").replace(/^\uFEFF/, "");
+  const delimiter = fileName.endsWith(".tsv") ? "\t" : ",";
+  const rows = parseDelimitedText(text, delimiter);
+
+  return importRowsToDatabase(rows);
+}
+
+async function importRowsToDatabase(rows) {
+  let imported = 0;
+  let skipped = 0;
+
+  for (const [index, row] of rows.entries()) {
+    if (isEmptySheetRow(row)) {
+      skipped += 1;
+      continue;
+    }
+
+    const submission = normalizeSheetImportRow(row, index + 1);
+
+    if (!submission.slot) {
+      skipped += 1;
+      continue;
+    }
+
+    await upsertDatabaseSubmissionWithNo(submission);
+    imported += 1;
+  }
+
+  await syncDatabaseNoSequence();
+
+  return { imported, skipped };
+}
+
+function parseDelimitedText(text, delimiter) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let isQuoted = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const nextChar = text[index + 1];
+
+    if (char === '"') {
+      if (isQuoted && nextChar === '"') {
+        cell += '"';
+        index += 1;
+      } else {
+        isQuoted = !isQuoted;
+      }
+      continue;
+    }
+
+    if (char === delimiter && !isQuoted) {
+      row.push(cell);
+      cell = "";
+      continue;
+    }
+
+    if ((char === "\n" || char === "\r") && !isQuoted) {
+      if (char === "\r" && nextChar === "\n") index += 1;
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+      continue;
+    }
+
+    cell += char;
+  }
+
+  if (cell || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+
+  const firstRow = rows[0]?.map(clean) || [];
+  const hasHeader = sheetHeaders.every((header, index) => firstRow[index] === header);
+  const hasLegacyHeader = legacySheetHeaders.every(
+    (header, index) => firstRow[index] === header,
+  );
+
+  return hasHeader || hasLegacyHeader ? rows.slice(1) : rows;
+}
+
+function normalizeSheetImportRow(row, fallbackNo) {
+  const normalizedRow = normalizeImportCells(row);
+  const paddedRow = fields.map((field, index) => [field, clean(normalizedRow[index])]);
+  const submission = Object.fromEntries(paddedRow);
+  submission.no = cleanSheetNo(submission.no) || fallbackNo;
+  submission.jenis = cleanJenis(submission.jenis || "BSS");
+  submission.slot = cleanSheetSlot(submission.slot, submission.jenis);
+  return submission;
+}
+
+function normalizeImportCells(row) {
+  if (row.length === fields.length - 1) {
+    const normalizedRow = [...row];
+    normalizedRow.splice(fields.indexOf("jenis"), 0, "BSS");
+    return normalizedRow;
+  }
+
+  return row;
+}
+
+function isEmptySheetRow(row) {
+  return row.every((value) => !clean(value));
+}
+
+function cleanSheetNo(value) {
+  const number = Number(clean(value));
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function cleanSheetSlot(value, jenis = "BSS") {
+  const allowedSlots = jenis === "EVCS" ? ["1", "2"] : ["6", "12"];
+  const slot = clean(value).match(/\b(1|2|6|12)\b/)?.[1] || clean(value);
+  return allowedSlots.includes(slot) ? slot : "";
+}
+
+function getDatabasePool() {
+  if (!databasePool) {
+    databasePool = new pg.Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl:
+        process.env.DATABASE_SSL === "true"
+          ? { rejectUnauthorized: false }
+          : undefined,
+    });
+  }
+
+  return databasePool;
+}
+
+async function upsertDatabaseSubmissionWithNo(submission) {
+  const updateColumns = databaseColumns
+    .filter((column) => column !== "no")
+    .map((column) => `${column} = EXCLUDED.${column}`)
+    .join(", ");
+  const placeholders = databaseColumns.map((_, index) => `$${index + 1}`).join(", ");
+
+  await getDatabasePool().query(
+    `
+      INSERT INTO bss_registrations (${databaseColumns.join(", ")})
+      VALUES (${placeholders})
+      ON CONFLICT (no) DO UPDATE SET ${updateColumns}
+    `,
+    [
+      submission.no,
+      submission.siteName,
+      submission.address,
+      submission.googleMapUrl,
+      submission.city,
+      submission.province,
+      submission.rentalPrice,
+      submission.jenis,
+      submission.slot,
+      submission.venuePic,
+      submission.accountNumber,
+      submission.rentPeriod,
+      submission.keyAccount,
+      submission.noTelpLokasi,
+      submission.fotoLokasi,
+      submission.approval,
+      submission.awalKontrak,
+      submission.akhirKontrak,
+      submission.masaKontrak,
+      submission.terminPembayaran,
+    ],
+  );
+}
+
+async function syncDatabaseNoSequence() {
+  await getDatabasePool().query(`
+    SELECT setval(
+      pg_get_serial_sequence('bss_registrations', 'no'),
+      COALESCE((SELECT MAX(no) FROM bss_registrations), 1),
+      true
+    )
+  `);
+}
+
+async function saveToDatabase(submission) {
+  const client = await getDatabasePool().connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const response = await client.query(
+      `
+        INSERT INTO bss_registrations (
+          site_name,
+          address,
+          google_map_url,
+          city,
+          province,
+          rental_price,
+          jenis,
+          slot,
+          venue_pic,
+          account_number,
+          rent_period,
+          key_account,
+          no_telp_lokasi,
+          foto_lokasi,
+          approval,
+          awal_kontrak,
+          akhir_kontrak,
+          masa_kontrak,
+          termin_pembayaran
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7,
+          $8, $9, $10, $11, $12, $13,
+          $14, $15, $16, $17, $18, $19
+        )
+        RETURNING no
+      `,
+      [
+        submission.siteName,
+        submission.address,
+        submission.googleMapUrl,
+        submission.city,
+        submission.province,
+        submission.rentalPrice,
+        submission.jenis,
+        submission.slot,
+        submission.venuePic,
+        submission.accountNumber,
+        submission.rentPeriod,
+        submission.keyAccount,
+        submission.noTelpLokasi,
+        submission.fotoLokasi,
+        submission.approval,
+        submission.awalKontrak,
+        submission.akhirKontrak,
+        submission.masaKontrak,
+        submission.terminPembayaran,
+      ],
+    );
+
+    const submissionNo = Number(response.rows[0].no);
+
+    await client.query("COMMIT");
+    return submissionNo;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function parsePhotoUrls(value) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+async function listSubmissions() {
+  if (hasDatabaseConfig()) {
+    return listDatabaseSubmissions();
+  }
+
+  const existing = await readJsonArray(jsonPath);
+  return existing
+    .slice()
+    .reverse()
+    .map((submission) => ({
+      no: submission.no,
+      siteName: submission.siteName,
+      address: submission.address,
+      googleMapUrl: submission.googleMapUrl,
+      city: submission.city,
+      province: submission.province,
+      rentalPrice: submission.rentalPrice,
+      jenis: submission.jenis || "BSS",
+      slot: submission.slot,
+      venuePic: submission.venuePic,
+      accountNumber: submission.accountNumber,
+      rentPeriod: submission.rentPeriod,
+      keyAccount: submission.keyAccount,
+      noTelpLokasi: submission.noTelpLokasi,
+      fotoLokasi: parsePhotoUrls(submission.fotoLokasi),
+      approval: submission.approval,
+      awalKontrak: submission.awalKontrak,
+      akhirKontrak: submission.akhirKontrak,
+      masaKontrak: submission.masaKontrak,
+      terminPembayaran: submission.terminPembayaran,
+      createdAt: "",
+    }));
+}
+
+async function listDatabaseSubmissions() {
+  const response = await getDatabasePool().query(`
+    SELECT
+      no,
+      site_name,
+      address,
+      google_map_url,
+      city,
+      province,
+      rental_price,
+      jenis,
+      slot,
+      venue_pic,
+      account_number,
+      rent_period,
+      key_account,
+      no_telp_lokasi,
+      foto_lokasi,
+      approval,
+      awal_kontrak,
+      akhir_kontrak,
+      masa_kontrak,
+      termin_pembayaran,
+      created_at
+    FROM bss_registrations
+    ORDER BY no ASC
+    LIMIT 500
+  `);
+
+  return response.rows.map((row) => ({
+    no: row.no,
+    siteName: row.site_name,
+    address: row.address,
+    googleMapUrl: row.google_map_url,
+    city: row.city,
+    province: row.province,
+    rentalPrice: row.rental_price,
+    jenis: row.jenis || "BSS",
+    slot: row.slot,
+    venuePic: row.venue_pic,
+    accountNumber: row.account_number,
+    rentPeriod: row.rent_period,
+    keyAccount: row.key_account,
+    noTelpLokasi: row.no_telp_lokasi,
+    fotoLokasi: parsePhotoUrls(row.foto_lokasi),
+    approval: row.approval,
+    awalKontrak: row.awal_kontrak,
+    akhirKontrak: row.akhir_kontrak,
+    masaKontrak: row.masa_kontrak,
+    terminPembayaran: row.termin_pembayaran,
+    createdAt: row.created_at,
+  }));
+}
+
+async function updateSubmission(submissionNo, updates) {
+  if (hasDatabaseConfig()) {
+    return updateDatabaseSubmission(submissionNo, updates);
+  }
+
+  return updateLocalSubmission(submissionNo, updates);
+}
+
+async function deleteSubmission(submissionNo) {
+  if (hasDatabaseConfig()) {
+    return deleteDatabaseSubmission(submissionNo);
+  }
+
+  return deleteLocalSubmission(submissionNo);
+}
+
+async function deleteDatabaseSubmission(submissionNo) {
+  const response = await getDatabasePool().query(
+    "DELETE FROM bss_registrations WHERE no = $1",
+    [submissionNo],
+  );
+
+  return response.rowCount > 0;
+}
+
+async function updateDatabaseSubmission(submissionNo, updates) {
+  const fieldMap = {
+    siteName: (value) => ["site_name", value],
+    address: (value) => ["address", value],
+    googleMapUrl: (value) => ["google_map_url", value],
+    city: (value) => ["city", value],
+    province: (value) => ["province", value],
+    rentalPrice: (value) => ["rental_price", value],
+    jenis: (value) => ["jenis", cleanJenis(value)],
+    slot: (value) => ["slot", cleanSlot(value, updates.jenis)],
+    venuePic: (value) => ["venue_pic", value],
+    accountNumber: (value) => ["account_number", value],
+    rentPeriod: (value) => ["rent_period", emptyToNull(value)],
+    keyAccount: (value) => ["key_account", value],
+    noTelpLokasi: (value) => ["no_telp_lokasi", value],
+    approval: (value) => ["approval", value],
+    awalKontrak: (value) => ["awal_kontrak", emptyToNull(value)],
+    akhirKontrak: (value) => ["akhir_kontrak", emptyToNull(value)],
+    masaKontrak: (value) => ["masa_kontrak", emptyToNull(value)],
+    terminPembayaran: (value) => ["termin_pembayaran", emptyToNull(value)],
+  };
+
+  const entries = Object.entries(updates).map(([field, value]) =>
+    fieldMap[field](value),
+  );
+  const assignments = entries.map(
+    ([column], index) => `${column} = $${index + 1}`,
+  );
+  const values = entries.map(([, value]) => value);
+
+  const response = await getDatabasePool().query(
+    `
+      UPDATE bss_registrations
+      SET ${assignments.join(", ")}
+      WHERE no = $${values.length + 1}
+      RETURNING no
+    `,
+    [...values, submissionNo],
+  );
+
+  if (response.rowCount === 0) return null;
+
+  return getDatabaseSubmission(submissionNo);
+}
+
+async function getDatabaseSubmission(submissionNo) {
+  const response = await getDatabasePool().query(
+    `
+      SELECT
+        no,
+        site_name,
+        address,
+        google_map_url,
+        city,
+        province,
+        rental_price,
+        jenis,
+        slot,
+        venue_pic,
+        account_number,
+        rent_period,
+        key_account,
+        no_telp_lokasi,
+        foto_lokasi,
+        approval,
+        awal_kontrak,
+        akhir_kontrak,
+        masa_kontrak,
+        termin_pembayaran,
+        created_at
+      FROM bss_registrations
+      WHERE no = $1
+      LIMIT 1
+    `,
+    [submissionNo],
+  );
+
+  if (response.rowCount === 0) return null;
+
+  const row = response.rows[0];
+  return {
+    no: row.no,
+    siteName: row.site_name,
+    address: row.address,
+    googleMapUrl: row.google_map_url,
+    city: row.city,
+    province: row.province,
+    rentalPrice: row.rental_price,
+    jenis: row.jenis || "BSS",
+    slot: row.slot,
+    venuePic: row.venue_pic,
+    accountNumber: row.account_number,
+    rentPeriod: row.rent_period,
+    keyAccount: row.key_account,
+    noTelpLokasi: row.no_telp_lokasi,
+    fotoLokasi: parsePhotoUrls(row.foto_lokasi),
+    approval: row.approval,
+    awalKontrak: row.awal_kontrak,
+    akhirKontrak: row.akhir_kontrak,
+    masaKontrak: row.masa_kontrak,
+    terminPembayaran: row.termin_pembayaran,
+    createdAt: row.created_at,
+  };
+}
+
+async function updateLocalSubmission(submissionNo, updates) {
+  const existing = await readJsonArray(jsonPath);
+  const index = existing.findIndex(
+    (submission) => Number(submission.no) === submissionNo,
+  );
+
+  if (index === -1) return null;
+
+  existing[index] = {
+    ...existing[index],
+    ...updates,
+  };
+
+  await writeFile(jsonPath, `${JSON.stringify(existing, null, 2)}\n`);
+
+  const csvRows = [
+    fields.map(escapeCsv).join(","),
+    ...existing.map((submission) =>
+      fields.map((field) => escapeCsv(submission[field])).join(","),
+    ),
+  ];
+  await writeFile(csvPath, `${csvRows.join("\n")}\n`);
+
+  return {
+    ...existing[index],
+    fotoLokasi: parsePhotoUrls(existing[index].fotoLokasi),
+    createdAt: "",
+  };
+}
+
+async function deleteLocalSubmission(submissionNo) {
+  const existing = await readJsonArray(jsonPath);
+  const nextSubmissions = existing.filter(
+    (submission) => Number(submission.no) !== submissionNo,
+  );
+
+  if (nextSubmissions.length === existing.length) return false;
+
+  await writeFile(jsonPath, `${JSON.stringify(nextSubmissions, null, 2)}\n`);
+
+  const csvRows = [
+    fields.map(escapeCsv).join(","),
+    ...nextSubmissions.map((submission) =>
+      fields.map((field) => escapeCsv(submission[field])).join(","),
+    ),
+  ];
+  await writeFile(csvPath, `${csvRows.join("\n")}\n`);
+
+  return true;
+}
+
+function emptyToNull(value) {
+  return value ? value : null;
+}
+
+function cleanJenis(value) {
+  const jenis = clean(value).toUpperCase();
+  if (!["BSS", "EVCS"].includes(jenis)) {
+    throw new Error("Jenis tidak valid.");
+  }
+
+  return jenis;
+}
+
+function isValidCapacity(jenis, value) {
+  const normalizedJenis = cleanJenis(jenis || "BSS");
+  const allowedSlots = normalizedJenis === "EVCS" ? ["1", "2"] : ["6", "12"];
+  return allowedSlots.includes(clean(value));
+}
+
+function cleanSlot(value, jenis = "BSS") {
+  const normalizedJenis = cleanJenis(jenis || "BSS");
+
+  if (!isValidCapacity(normalizedJenis, value)) {
+    throw new Error(
+      normalizedJenis === "EVCS"
+        ? "Jumlah EVCS tidak valid."
+        : "Slot BSS tidak valid.",
+    );
+  }
+
+  return clean(value);
+}
+
 async function getNextSheetNumber(sheets, tabName) {
   const spreadsheetId = process.env.GOOGLE_SHEETS_ID;
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${tabName}!A2:U`,
+    range: `${tabName}!A2:T`,
   });
   const existingRows = response.data.values || [];
   const filledRows = existingRows.filter((row) =>
@@ -570,7 +1505,7 @@ async function ensureSheetHeader(sheets, tabName) {
   const spreadsheetId = process.env.GOOGLE_SHEETS_ID;
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${tabName}!A1:U1`,
+    range: `${tabName}!A1:T1`,
   });
 
   const existingHeaders = response.data.values?.[0] || [];
@@ -578,7 +1513,7 @@ async function ensureSheetHeader(sheets, tabName) {
 
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range: `${tabName}!A1:U1`,
+    range: `${tabName}!A1:T1`,
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: [sheetHeaders],
