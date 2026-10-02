@@ -28,6 +28,9 @@ Database dibuat mengikuti kolom spreadsheet internal. Nama kolom di PostgreSQL m
 | Termin Pembayaran | `termin_pembayaran` |
 
 Foto tetap disimpan di Cloudinary. Database hanya menyimpan link Cloudinary di kolom `foto_lokasi`. Jika ada lebih dari 1 foto, link disimpan dalam 1 text dipisahkan baris baru.
+Untuk upload baru, metadata Cloudinary juga disimpan di `foto_lokasi_meta`, termasuk `public_id`, ukuran, dimensi, dan format. Ini dipakai agar penghapusan foto lebih presisi dan tidak perlu menebak `public_id` dari URL.
+
+Kolom `idempotency_key` dipakai untuk mencegah submit ganda. Jika user tidak sengaja klik kirim ulang, PostgreSQL akan mengembalikan data yang sama, bukan membuat baris duplikat.
 
 ## Buat Database Lokal
 
@@ -54,6 +57,12 @@ Kalau database sudah ada dari versi sebelum kolom `Jenis`, jalankan migration:
 
 ```powershell
 psql -U form_kmb_user -d form_kmb -f database/migrations/002_add_jenis.sql
+```
+
+Untuk versi direct upload Cloudinary dan proteksi submit ganda, jalankan migration:
+
+```powershell
+psql -U form_kmb_user -d form_kmb -f database/migrations/003_cloudinary_direct_upload.sql
 ```
 
 Kalau database lokal sudah pernah dibuat dengan struktur lama dan ingin reset bersih:

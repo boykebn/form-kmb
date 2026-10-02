@@ -5,6 +5,7 @@
 
 CREATE TABLE IF NOT EXISTS bss_registrations (
   no BIGSERIAL PRIMARY KEY,
+  idempotency_key TEXT UNIQUE,
   site_name TEXT NOT NULL,
   address TEXT NOT NULL,
   google_map_url TEXT NOT NULL,
@@ -19,6 +20,7 @@ CREATE TABLE IF NOT EXISTS bss_registrations (
   key_account TEXT DEFAULT '',
   no_telp_lokasi TEXT NOT NULL,
   foto_lokasi TEXT NOT NULL DEFAULT '',
+  foto_lokasi_meta JSONB NOT NULL DEFAULT '[]'::jsonb,
   approval TEXT DEFAULT '',
   awal_kontrak TEXT DEFAULT '',
   akhir_kontrak TEXT DEFAULT '',
@@ -36,6 +38,9 @@ CREATE INDEX IF NOT EXISTS idx_bss_registrations_city
 
 CREATE INDEX IF NOT EXISTS idx_bss_registrations_approval
   ON bss_registrations (approval);
+
+CREATE INDEX IF NOT EXISTS idx_bss_registrations_idempotency_key
+  ON bss_registrations (idempotency_key);
 
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$

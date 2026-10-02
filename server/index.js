@@ -24,6 +24,9 @@ const csvPath = path.join(dataDir, "submissions.csv");
 const app = express();
 const port = Number(process.env.PORT || 4444);
 const allowedOrigin = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+const maxPhotoFiles = 10;
+const maxPhotoFileSize = 5 * 1024 * 1024;
+const maxPhotoTotalSize = 25 * 1024 * 1024;
 let databasePool;
 
 const fields = [
@@ -102,7 +105,8 @@ const databaseColumns = [
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 5 * 1024 * 1024,
+    fileSize: maxPhotoFileSize,
+    files: maxPhotoFiles,
   },
   fileFilter: (_req, file, callback) => {
     if (!file.mimetype.startsWith("image/")) {
@@ -155,6 +159,71 @@ app.post("/api/admin/login", (req, res) => {
   }
 
   res.json({ token: createAdminToken() });
+});
+
+app.post("/api/cloudinary/sign-upload", (req, res) => {
+  if (!hasCloudinaryConfig()) {
+    return res.status(503).json({ message: "Cloudinary belum dikonfigurasi." });
+  }
+
+  configureCloudinary();
+
+  const cloudinaryConfig = cloudinary.config();
+  const timestamp = Math.round(Date.now() / 1000);
+  const idempotencyKey =
+    clean(req.body?.idempotencyKey) || crypto.randomUUID();
+  const fileName = clean(req.body?.fileName) || "foto-lokasi";
+  const photoIndex = Number(req.body?.photoIndex || 0);
+  const folder = buildCloudinarySubmissionFolder(idempotencyKey);
+  const publicId = buildCloudinaryPhotoName(fileName, photoIndex);
+  const signatureParams = {
+    folder,
+    overwrite: "true",
+    public_id: publicId,
+    timestamp,
+  };
+
+  const signature = cloudinary.utils.api_sign_request(
+    signatureParams,
+    cloudinaryConfig.api_secret,
+  );
+
+  res.json({
+    apiKey: cloudinaryConfig.api_key,
+    cloudName: cloudinaryConfig.cloud_name,
+    folder,
+    maxFiles: maxPhotoFiles,
+    maxFileSize: maxPhotoFileSize,
+    maxTotalSize: maxPhotoTotalSize,
+    publicId,
+    signature,
+    timestamp,
+  });
+});
+
+app.post("/api/cloudinary/cleanup", async (req, res, next) => {
+  try {
+    if (!hasCloudinaryConfig()) {
+      return res.status(503).json({ message: "Cloudinary belum dikonfigurasi." });
+    }
+
+    const publicIds = Array.isArray(req.body?.publicIds)
+      ? req.body.publicIds.map(clean).filter(Boolean)
+      : [];
+    const allowedPrefix = `${getCloudinaryBaseFolder()}/`;
+    const safePublicIds = publicIds.filter((publicId) =>
+      publicId.startsWith(allowedPrefix),
+    );
+
+    await deleteCloudinaryPhotos(safePublicIds);
+
+    res.json({
+      deleted: safePublicIds.length,
+      skipped: publicIds.length - safePublicIds.length,
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get("/api/submissions", requireAdmin, async (_req, res, next) => {
@@ -298,13 +367,20 @@ app.get("/api/submissions/export.csv", requireAdmin, async (_req, res, next) => 
 app.post(
   "/api/uploads",
   ensureUploadDir,
-  upload.array("fotoLokasi", 10),
+  upload.array("fotoLokasi", maxPhotoFiles),
   async (req, res, next) => {
     try {
       const files = req.files || [];
+      const totalSize = files.reduce((total, file) => total + file.size, 0);
 
       if (files.length === 0) {
         return res.status(400).json({ message: "Foto lokasi belum dipilih." });
+      }
+
+      if (totalSize > maxPhotoTotalSize) {
+        return res.status(413).json({
+          message: `Total ukuran foto terlalu besar. Maksimal total ${formatFileSize(maxPhotoTotalSize)} per sekali kirim.`,
+        });
       }
 
       const uploadedFiles = hasCloudinaryConfig()
@@ -359,6 +435,29 @@ if (existsSync(clientIndexPath)) {
 
 app.use((error, _req, res, _next) => {
   console.error(error);
+
+  if (error instanceof multer.MulterError) {
+    if (error.code === "LIMIT_FILE_SIZE") {
+      return res.status(413).json({
+        message: `Ada foto yang terlalu besar. Maksimal ${formatFileSize(maxPhotoFileSize)} per file.`,
+      });
+    }
+
+    if (error.code === "LIMIT_FILE_COUNT") {
+      return res.status(413).json({
+        message: `Jumlah foto terlalu banyak. Maksimal ${maxPhotoFiles} foto dalam sekali upload.`,
+      });
+    }
+
+    return res.status(400).json({ message: "Upload foto belum valid." });
+  }
+
+  if (error.type === "entity.too.large") {
+    return res.status(413).json({
+      message: "Ukuran request terlalu besar. Kurangi ukuran file lalu coba lagi.",
+    });
+  }
+
   res
     .status(500)
     .json({ message: "Server sedang bermasalah. Coba lagi sebentar." });
@@ -374,7 +473,14 @@ server.on("error", (error) => {
 });
 
 function normalizeFormData(input = {}) {
+  const fotoLokasiMeta = normalizePhotoMetadata(input.fotoLokasiMeta);
+  const fotoLokasi = clean(input.fotoLokasi) || fotoLokasiMeta
+    .map((photo) => photo.url)
+    .filter(Boolean)
+    .join("\n");
+
   return {
+    idempotencyKey: clean(input.idempotencyKey),
     agentPic: clean(input.agentPic),
     noTelpAgent: clean(input.noTelpAgent),
     namaLokasi: clean(input.namaLokasi),
@@ -388,7 +494,8 @@ function normalizeFormData(input = {}) {
     provinsi: clean(input.provinsi),
     jenis: clean(input.jenis) || "BSS",
     slotBss: clean(input.slotBss),
-    fotoLokasi: clean(input.fotoLokasi),
+    fotoLokasi,
+    fotoLokasiMeta,
   };
 }
 
@@ -488,6 +595,25 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
+function normalizePhotoMetadata(value) {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((photo) => ({
+      fileName: clean(photo?.fileName).slice(0, 240),
+      filePath: clean(photo?.filePath || photo?.publicId),
+      fileUrl: clean(photo?.fileUrl || photo?.url),
+      publicId: clean(photo?.publicId || photo?.filePath),
+      size: Number(photo?.size || 0),
+      width: Number(photo?.width || 0),
+      height: Number(photo?.height || 0),
+      bytes: Number(photo?.bytes || photo?.size || 0),
+      format: clean(photo?.format),
+      resourceType: clean(photo?.resourceType || "image"),
+    }))
+    .filter((photo) => photo.fileUrl || photo.publicId);
+}
+
 function requireAdmin(req, res, next) {
   const authHeader = req.get("authorization") || "";
   const token = authHeader.startsWith("Bearer ")
@@ -567,6 +693,7 @@ async function ensureUploadDir(_req, _res, next) {
 async function buildInternalSubmission(formData) {
   return {
     no: await getNextSubmissionNumber(),
+    idempotencyKey: formData.idempotencyKey,
     siteName: formData.namaLokasi,
     address: formData.alamat,
     googleMapUrl: formData.googleMapUrl,
@@ -581,6 +708,7 @@ async function buildInternalSubmission(formData) {
     keyAccount: formData.agentPic,
     noTelpLokasi: formData.noTelpLokasi,
     fotoLokasi: formData.fotoLokasi,
+    fotoLokasiMeta: formData.fotoLokasiMeta,
     approval: "",
     awalKontrak: "",
     akhirKontrak: "",
@@ -962,6 +1090,7 @@ async function saveToDatabase(submission) {
     const response = await client.query(
       `
         INSERT INTO bss_registrations (
+          idempotency_key,
           site_name,
           address,
           google_map_url,
@@ -976,6 +1105,7 @@ async function saveToDatabase(submission) {
           key_account,
           no_telp_lokasi,
           foto_lokasi,
+          foto_lokasi_meta,
           approval,
           awal_kontrak,
           akhir_kontrak,
@@ -985,11 +1115,15 @@ async function saveToDatabase(submission) {
         VALUES (
           $1, $2, $3, $4, $5, $6, $7,
           $8, $9, $10, $11, $12, $13,
-          $14, $15, $16, $17, $18, $19
+          $14, $15, $16, $17, $18, $19,
+          $20, $21
         )
+        ON CONFLICT (idempotency_key) DO UPDATE
+        SET idempotency_key = EXCLUDED.idempotency_key
         RETURNING no
       `,
       [
+        submission.idempotencyKey || null,
         submission.siteName,
         submission.address,
         submission.googleMapUrl,
@@ -1004,6 +1138,7 @@ async function saveToDatabase(submission) {
         submission.keyAccount,
         submission.noTelpLokasi,
         submission.fotoLokasi,
+        JSON.stringify(submission.fotoLokasiMeta || []),
         submission.approval,
         submission.awalKontrak,
         submission.akhirKontrak,
@@ -1031,11 +1166,36 @@ function parsePhotoUrls(value) {
     .filter(Boolean);
 }
 
-async function deleteCloudinaryPhotos(photoUrls) {
+function parsePhotoMetadataValue(value) {
+  if (Array.isArray(value)) return normalizePhotoMetadata(value);
+  if (!value) return [];
+
+  try {
+    return normalizePhotoMetadata(JSON.parse(value));
+  } catch {
+    return [];
+  }
+}
+
+function getPhotoList(urlValue, metadataValue) {
+  const metadata = parsePhotoMetadataValue(metadataValue);
+  if (metadata.length > 0) {
+    return metadata.map((photo) => ({
+      type: photo.fileName,
+      url: photo.fileUrl,
+      publicId: photo.publicId || photo.filePath,
+      size: photo.bytes || photo.size,
+    }));
+  }
+
+  return parsePhotoUrls(urlValue);
+}
+
+async function deleteCloudinaryPhotos(photoRefs) {
   if (!hasCloudinaryConfig()) return;
 
-  const publicIds = photoUrls
-    .map(extractCloudinaryPublicId)
+  const publicIds = photoRefs
+    .map(getCloudinaryPublicId)
     .filter(Boolean);
 
   if (publicIds.length === 0) return;
@@ -1057,6 +1217,18 @@ async function deleteCloudinaryPhotos(photoUrls) {
       }
     }),
   );
+}
+
+function getCloudinaryPublicId(photoRef) {
+  if (typeof photoRef === "object" && photoRef) {
+    return clean(photoRef.publicId || photoRef.filePath);
+  }
+
+  const value = clean(photoRef);
+  if (!value) return "";
+  if (!value.startsWith("http")) return value;
+
+  return extractCloudinaryPublicId(value);
 }
 
 function extractCloudinaryPublicId(url) {
@@ -1106,7 +1278,7 @@ async function listSubmissions() {
       rentPeriod: submission.rentPeriod,
       keyAccount: submission.keyAccount,
       noTelpLokasi: submission.noTelpLokasi,
-      fotoLokasi: parsePhotoUrls(submission.fotoLokasi),
+      fotoLokasi: getPhotoList(submission.fotoLokasi, submission.fotoLokasiMeta),
       approval: submission.approval,
       awalKontrak: submission.awalKontrak,
       akhirKontrak: submission.akhirKontrak,
@@ -1134,6 +1306,7 @@ async function listDatabaseSubmissions() {
       key_account,
       no_telp_lokasi,
       foto_lokasi,
+      foto_lokasi_meta,
       approval,
       awal_kontrak,
       akhir_kontrak,
@@ -1160,7 +1333,7 @@ async function listDatabaseSubmissions() {
     rentPeriod: row.rent_period,
     keyAccount: row.key_account,
     noTelpLokasi: row.no_telp_lokasi,
-    fotoLokasi: parsePhotoUrls(row.foto_lokasi),
+    fotoLokasi: getPhotoList(row.foto_lokasi, row.foto_lokasi_meta),
     approval: row.approval,
     awalKontrak: row.awal_kontrak,
     akhirKontrak: row.akhir_kontrak,
@@ -1188,13 +1361,15 @@ async function deleteSubmission(submissionNo) {
 
 async function deleteDatabaseSubmission(submissionNo) {
   const existing = await getDatabasePool().query(
-    "SELECT foto_lokasi FROM bss_registrations WHERE no = $1 LIMIT 1",
+    "SELECT foto_lokasi, foto_lokasi_meta FROM bss_registrations WHERE no = $1 LIMIT 1",
     [submissionNo],
   );
 
   if (existing.rowCount === 0) return false;
 
-  await deleteCloudinaryPhotos(parsePhotoUrls(existing.rows[0].foto_lokasi));
+  await deleteCloudinaryPhotos(
+    getPhotoList(existing.rows[0].foto_lokasi, existing.rows[0].foto_lokasi_meta),
+  );
 
   const response = await getDatabasePool().query(
     "DELETE FROM bss_registrations WHERE no = $1",
@@ -1268,6 +1443,7 @@ async function getDatabaseSubmission(submissionNo) {
         key_account,
         no_telp_lokasi,
         foto_lokasi,
+        foto_lokasi_meta,
         approval,
         awal_kontrak,
         akhir_kontrak,
@@ -1299,7 +1475,7 @@ async function getDatabaseSubmission(submissionNo) {
     rentPeriod: row.rent_period,
     keyAccount: row.key_account,
     noTelpLokasi: row.no_telp_lokasi,
-    fotoLokasi: parsePhotoUrls(row.foto_lokasi),
+    fotoLokasi: getPhotoList(row.foto_lokasi, row.foto_lokasi_meta),
     approval: row.approval,
     awalKontrak: row.awal_kontrak,
     akhirKontrak: row.akhir_kontrak,
@@ -1334,7 +1510,7 @@ async function updateLocalSubmission(submissionNo, updates) {
 
   return {
     ...existing[index],
-    fotoLokasi: parsePhotoUrls(existing[index].fotoLokasi),
+    fotoLokasi: getPhotoList(existing[index].fotoLokasi, existing[index].fotoLokasiMeta),
     createdAt: "",
   };
 }
@@ -1350,7 +1526,9 @@ async function deleteLocalSubmission(submissionNo) {
   const deletedSubmission = existing.find(
     (submission) => Number(submission.no) === submissionNo,
   );
-  await deleteCloudinaryPhotos(parsePhotoUrls(deletedSubmission?.fotoLokasi));
+  await deleteCloudinaryPhotos(
+    getPhotoList(deletedSubmission?.fotoLokasi, deletedSubmission?.fotoLokasiMeta),
+  );
 
   await writeFile(jsonPath, `${JSON.stringify(nextSubmissions, null, 2)}\n`);
 
@@ -1501,6 +1679,30 @@ function configureCloudinary() {
   });
 }
 
+function getCloudinaryBaseFolder() {
+  return clean(process.env.CLOUDINARY_FOLDER || "foto-site").replace(/^\/|\/$/g, "");
+}
+
+function buildCloudinarySubmissionFolder(idempotencyKey) {
+  const safeKey = clean(idempotencyKey)
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 80);
+  return `${getCloudinaryBaseFolder()}/submissions/${safeKey || crypto.randomUUID()}`;
+}
+
+function buildCloudinaryPhotoName(fileName, photoIndex) {
+  const baseName = clean(fileName)
+    .toLowerCase()
+    .replace(/\.[^.]+$/, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 70);
+  const index = Number.isFinite(photoIndex) ? photoIndex + 1 : 1;
+  return `${String(index).padStart(2, "0")}-${baseName || "foto-lokasi"}`;
+}
+
 async function listBssGalleryImages() {
   configureCloudinary();
 
@@ -1564,6 +1766,14 @@ function buildUploadFileName(originalName) {
     .replace(/^-|-$/g, "");
   const extension = path.extname(originalName).toLowerCase();
   return `${Date.now()}-${safeName || "foto-lokasi"}${extension}`;
+}
+
+function formatFileSize(size) {
+  if (size >= 1024 * 1024) {
+    return `${(size / (1024 * 1024)).toFixed(1).replace(".0", "")} MB`;
+  }
+
+  return `${Math.max(1, Math.round(size / 1024))} KB`;
 }
 
 async function ensureSheetHeader(sheets, tabName) {

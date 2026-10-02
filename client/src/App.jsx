@@ -4,6 +4,13 @@ import "./App.css";
 const jakartaCenter = { lat: -6.2088, lng: 106.8456 };
 let googleMapsPromise;
 
+const maxPhotoFiles = 10;
+const maxPhotoFileSize = 5 * 1024 * 1024;
+const maxPhotoTotalSize = 25 * 1024 * 1024;
+const maxPhotoDimension = 1600;
+const photoCompressionQuality = 0.76;
+const maxParallelUploads = 3;
+
 const initialForm = {
   jenis: "BSS",
   agentPic: "",
@@ -1682,8 +1689,12 @@ function ProgramBssPage() {
 }
 
 function FormPage() {
+  const fileInputRef = useRef(null);
   const [form, setForm] = useState(initialForm);
+  const [submissionKey, setSubmissionKey] = useState(() => createSubmissionKey());
   const [fotoLokasiFiles, setFotoLokasiFiles] = useState([]);
+  const [fotoLokasiErrors, setFotoLokasiErrors] = useState([]);
+  const [uploadProgress, setUploadProgress] = useState(null);
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
 
@@ -1699,7 +1710,19 @@ function FormPage() {
   function updateFile(event) {
     const files = Array.from(event.target.files || []);
     setFotoLokasiFiles(files);
+    setFotoLokasiErrors(validatePhotoFiles(files));
     setForm((current) => ({ ...current, fotoLokasi: "" }));
+  }
+
+  function removePhotoFile(fileIndex) {
+    const nextFiles = fotoLokasiFiles.filter((_, index) => index !== fileIndex);
+
+    setFotoLokasiFiles(nextFiles);
+    setFotoLokasiErrors(validatePhotoFiles(nextFiles));
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
   }
 
   const updateLocation = useCallback((location) => {
@@ -1718,47 +1741,59 @@ function FormPage() {
     event.preventDefault();
     setStatus("loading");
     setMessage("");
+    setUploadProgress(null);
+
+    let uploadedPhotos = [];
 
     try {
       let fotoLokasi = form.fotoLokasi;
+      let fotoLokasiMeta = [];
+      const photoErrors = validatePhotoFiles(fotoLokasiFiles);
+
+      if (photoErrors.length > 0) {
+        setFotoLokasiErrors(photoErrors);
+        throw new Error(photoErrors.join(" "));
+      }
 
       if (fotoLokasiFiles.length > 0) {
-        const uploadData = new FormData();
-        fotoLokasiFiles.forEach((file) => {
-          uploadData.append("fotoLokasi", file);
-        });
-
-        const uploadResponse = await fetch("/api/uploads", {
-          method: "POST",
-          body: uploadData,
-        });
-        const uploadResult = await uploadResponse.json();
-
-        if (!uploadResponse.ok) {
-          throw new Error(
-            uploadResult.message || "Foto lokasi belum bisa diupload.",
-          );
-        }
-
-        fotoLokasi = uploadResult.files.map((file) => file.fileUrl).join("\n");
+        uploadedPhotos = await uploadPhotoFiles(
+          fotoLokasiFiles,
+          submissionKey,
+          setUploadProgress,
+        );
+        fotoLokasiMeta = uploadedPhotos;
+        fotoLokasi = uploadedPhotos.map((file) => file.fileUrl).join("\n");
       }
 
       const response = await fetch("/api/submissions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...form, fotoLokasi }),
+        body: JSON.stringify({
+          ...form,
+          idempotencyKey: submissionKey,
+          fotoLokasi,
+          fotoLokasiMeta,
+        }),
       });
-      const result = await response.json();
+      const result = await readJsonResponse(response);
 
       if (!response.ok) {
         throw new Error(result.message || "Respons belum bisa dikirim.");
       }
 
       setForm(initialForm);
+      setSubmissionKey(createSubmissionKey());
       setFotoLokasiFiles([]);
+      setFotoLokasiErrors([]);
+      setUploadProgress(null);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
       setStatus("success");
       setMessage(result.message);
     } catch (error) {
+      await cleanupUploadedPhotos(uploadedPhotos);
+      setUploadProgress(null);
       setStatus("error");
       setMessage(error.message);
     }
@@ -2025,6 +2060,7 @@ function FormPage() {
               </div>
               <div className="file-upload">
                 <input
+                  ref={fileInputRef}
                   id="fotoLokasi"
                   name="fotoLokasi"
                   type="file"
@@ -2037,15 +2073,53 @@ function FormPage() {
                   Pilih foto
                 </label>
                 <p>
-                  {fotoLokasiFiles.length > 0
-                    ? `${fotoLokasiFiles.length} foto dipilih`
-                    : "Bisa pilih lebih dari 1 foto, maksimal 5 MB per file."}
+                  {uploadProgress
+                    ? `Mengupload ${uploadProgress.done}/${uploadProgress.total} foto...`
+                    : fotoLokasiFiles.length > 0
+                      ? `${fotoLokasiFiles.length} foto dipilih, total ${formatFileSize(getTotalFileSize(fotoLokasiFiles))}`
+                      : `Bisa pilih lebih dari 1 foto. Maksimal ${maxPhotoFiles} foto, ${formatFileSize(maxPhotoFileSize)} per file, total ${formatFileSize(maxPhotoTotalSize)}.`}
                 </p>
               </div>
+              {uploadProgress && (
+                <div className="upload-progress" aria-label="Progress upload foto">
+                  <span
+                    style={{
+                      width: `${Math.round((uploadProgress.done / uploadProgress.total) * 100)}%`,
+                    }}
+                  />
+                </div>
+              )}
+              {fotoLokasiErrors.length > 0 && (
+                <div className="file-upload-alert" role="alert">
+                  <strong>Foto belum bisa dikirim</strong>
+                  <ul>
+                    {fotoLokasiErrors.map((error) => (
+                      <li key={error}>{error}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               {fotoLokasiFiles.length > 0 && (
                 <ul className="file-list">
-                  {fotoLokasiFiles.map((file) => (
-                    <li key={`${file.name}-${file.size}`}>{file.name}</li>
+                  {fotoLokasiFiles.map((file, index) => (
+                    <li
+                      className={
+                        file.size > maxPhotoFileSize ? "file-too-large" : ""
+                      }
+                      key={`${file.name}-${file.size}-${index}`}
+                    >
+                      <span>
+                        {file.name}
+                        <small>{formatFileSize(file.size)}</small>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => removePhotoFile(index)}
+                        aria-label={`Hapus ${file.name}`}
+                      >
+                        Hapus
+                      </button>
+                    </li>
                   ))}
                 </ul>
               )}
@@ -2066,6 +2140,273 @@ function FormPage() {
       </form>
     </main>
   );
+}
+
+function validatePhotoFiles(files) {
+  const errors = [];
+  const totalSize = getTotalFileSize(files);
+  const largeFiles = files.filter((file) => file.size > maxPhotoFileSize);
+
+  if (files.length > maxPhotoFiles) {
+    errors.push(`Maksimal ${maxPhotoFiles} foto dalam sekali upload.`);
+  }
+
+  if (totalSize > maxPhotoTotalSize) {
+    errors.push(
+      `Total ukuran foto ${formatFileSize(totalSize)}. Maksimal total ${formatFileSize(maxPhotoTotalSize)}.`,
+    );
+  }
+
+  largeFiles.forEach((file) => {
+    errors.push(
+      `${file.name} terlalu besar (${formatFileSize(file.size)}). Maksimal ${formatFileSize(maxPhotoFileSize)} per file.`,
+    );
+  });
+
+  return errors;
+}
+
+async function uploadPhotoFiles(files, submissionKey, onProgress) {
+  const compressedFiles = [];
+
+  for (const file of files) {
+    compressedFiles.push(await compressPhotoFile(file));
+  }
+
+  try {
+    return await uploadPhotosDirectToCloudinary(
+      compressedFiles,
+      submissionKey,
+      onProgress,
+    );
+  } catch (error) {
+    if (error.code !== "cloudinary_not_configured") throw error;
+    return uploadPhotosViaServer(compressedFiles, onProgress);
+  }
+}
+
+async function uploadPhotosDirectToCloudinary(files, submissionKey, onProgress) {
+  const results = new Array(files.length);
+  let nextIndex = 0;
+  let completed = 0;
+
+  onProgress({ done: 0, total: files.length });
+
+  async function worker() {
+    while (nextIndex < files.length) {
+      const fileIndex = nextIndex;
+      nextIndex += 1;
+      results[fileIndex] = await uploadSinglePhotoToCloudinary(
+        files[fileIndex],
+        submissionKey,
+        fileIndex,
+      );
+      completed += 1;
+      onProgress({ done: completed, total: files.length });
+    }
+  }
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(maxParallelUploads, files.length) },
+      () => worker(),
+    ),
+  );
+
+  return results;
+}
+
+async function uploadSinglePhotoToCloudinary(file, submissionKey, photoIndex) {
+  const signResponse = await fetch("/api/cloudinary/sign-upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fileName: file.name,
+      idempotencyKey: submissionKey,
+      photoIndex,
+    }),
+  });
+  const signResult = await readJsonResponse(signResponse);
+
+  if (signResponse.status === 503) {
+    const error = new Error(signResult.message || "Cloudinary belum aktif.");
+    error.code = "cloudinary_not_configured";
+    throw error;
+  }
+
+  if (!signResponse.ok) {
+    throw new Error(signResult.message || "Signature upload belum bisa dibuat.");
+  }
+
+  const uploadData = new FormData();
+  uploadData.append("file", file);
+  uploadData.append("api_key", signResult.apiKey);
+  uploadData.append("timestamp", signResult.timestamp);
+  uploadData.append("signature", signResult.signature);
+  uploadData.append("folder", signResult.folder);
+  uploadData.append("public_id", signResult.publicId);
+  uploadData.append("overwrite", "true");
+
+  const uploadResponse = await fetch(
+    `https://api.cloudinary.com/v1_1/${signResult.cloudName}/image/upload`,
+    {
+      method: "POST",
+      body: uploadData,
+    },
+  );
+  const uploadResult = await readJsonResponse(uploadResponse);
+
+  if (!uploadResponse.ok) {
+    throw new Error(
+      uploadResult.error?.message ||
+        uploadResult.message ||
+        `${file.name} belum bisa diupload ke Cloudinary.`,
+    );
+  }
+
+  return {
+    bytes: uploadResult.bytes || file.size,
+    fileName: file.name,
+    filePath: uploadResult.public_id,
+    fileUrl: uploadResult.secure_url,
+    format: uploadResult.format,
+    height: uploadResult.height,
+    publicId: uploadResult.public_id,
+    resourceType: uploadResult.resource_type || "image",
+    size: uploadResult.bytes || file.size,
+    width: uploadResult.width,
+  };
+}
+
+async function uploadPhotosViaServer(files, onProgress) {
+  const uploadData = new FormData();
+
+  files.forEach((file) => {
+    uploadData.append("fotoLokasi", file);
+  });
+
+  onProgress({ done: 0, total: files.length });
+
+  const uploadResponse = await fetch("/api/uploads", {
+    method: "POST",
+    body: uploadData,
+  });
+  const uploadResult = await readJsonResponse(uploadResponse);
+
+  if (!uploadResponse.ok) {
+    throw new Error(uploadResult.message || "Foto lokasi belum bisa diupload.");
+  }
+
+  onProgress({ done: files.length, total: files.length });
+
+  return (uploadResult.files || []).map((file) => ({
+    ...file,
+    publicId: file.filePath,
+  }));
+}
+
+async function cleanupUploadedPhotos(uploadedPhotos) {
+  const publicIds = uploadedPhotos
+    .map((photo) => photo.publicId || photo.filePath)
+    .filter(Boolean);
+
+  if (publicIds.length === 0) return;
+
+  try {
+    await fetch("/api/cloudinary/cleanup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ publicIds }),
+    });
+  } catch {
+    // Cleanup is best-effort; the form error remains the important signal.
+  }
+}
+
+async function compressPhotoFile(file) {
+  if (!file.type.startsWith("image/") || file.type === "image/gif") {
+    return file;
+  }
+
+  const image = await loadImageFile(file);
+  const scale = Math.min(1, maxPhotoDimension / Math.max(image.width, image.height));
+  const width = Math.max(1, Math.round(image.width * scale));
+  const height = Math.max(1, Math.round(image.height * scale));
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+
+  if (!context) return file;
+
+  canvas.width = width;
+  canvas.height = height;
+  context.drawImage(image, 0, 0, width, height);
+
+  const blob = await new Promise((resolve) => {
+    canvas.toBlob(resolve, "image/jpeg", photoCompressionQuality);
+  });
+
+  URL.revokeObjectURL(image.src);
+
+  if (!blob || blob.size >= file.size) return file;
+
+  return new File([blob], replaceFileExtension(file.name, "jpg"), {
+    type: "image/jpeg",
+    lastModified: Date.now(),
+  });
+}
+
+function loadImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => {
+      URL.revokeObjectURL(image.src);
+      reject(new Error(`${file.name} belum bisa diproses sebagai gambar.`));
+    };
+    image.src = URL.createObjectURL(file);
+  });
+}
+
+function replaceFileExtension(fileName, extension) {
+  return `${fileName.replace(/\.[^.]+$/, "")}.${extension}`;
+}
+
+function getTotalFileSize(files) {
+  return files.reduce((total, file) => total + file.size, 0);
+}
+
+function formatFileSize(size) {
+  if (size >= 1024 * 1024) {
+    return `${(size / (1024 * 1024)).toFixed(1).replace(".0", "")} MB`;
+  }
+
+  return `${Math.max(1, Math.round(size / 1024))} KB`;
+}
+
+function createSubmissionKey() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function readJsonResponse(response) {
+  const text = await response.text();
+
+  if (!text) return {};
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    if (response.status === 413) {
+      return {
+        message:
+          "Ukuran foto terlalu besar. Maksimal 5 MB per file dan total 25 MB per sekali kirim.",
+      };
+    }
+
+    return {
+      message: "Server mengembalikan respons yang belum bisa dibaca.",
+    };
+  }
 }
 
 function MapPicker({ value, onLocationChange }) {
