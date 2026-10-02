@@ -1031,6 +1031,57 @@ function parsePhotoUrls(value) {
     .filter(Boolean);
 }
 
+async function deleteCloudinaryPhotos(photoUrls) {
+  if (!hasCloudinaryConfig()) return;
+
+  const publicIds = photoUrls
+    .map(extractCloudinaryPublicId)
+    .filter(Boolean);
+
+  if (publicIds.length === 0) return;
+
+  configureCloudinary();
+
+  await Promise.all(
+    publicIds.map(async (publicId) => {
+      try {
+        const result = await cloudinary.uploader.destroy(publicId, {
+          resource_type: "image",
+        });
+
+        if (!["ok", "not found"].includes(result?.result)) {
+          console.warn("Cloudinary delete result:", publicId, result?.result);
+        }
+      } catch (error) {
+        console.error("Gagal hapus foto Cloudinary:", publicId, error);
+      }
+    }),
+  );
+}
+
+function extractCloudinaryPublicId(url) {
+  try {
+    const parsedUrl = new URL(url);
+    if (!parsedUrl.hostname.includes("cloudinary.com")) return "";
+
+    const uploadIndex = parsedUrl.pathname.indexOf("/upload/");
+    if (uploadIndex === -1) return "";
+
+    const afterUpload = decodeURIComponent(
+      parsedUrl.pathname.slice(uploadIndex + "/upload/".length),
+    );
+    const pathParts = afterUpload.split("/").filter(Boolean);
+    const versionIndex = pathParts.findIndex((part) => /^v\d+$/.test(part));
+    const publicPathParts =
+      versionIndex >= 0 ? pathParts.slice(versionIndex + 1) : pathParts;
+    const publicPath = publicPathParts.join("/");
+
+    return publicPath.replace(/\.[a-zA-Z0-9]+$/, "");
+  } catch {
+    return "";
+  }
+}
+
 async function listSubmissions() {
   if (hasDatabaseConfig()) {
     return listDatabaseSubmissions();
@@ -1136,6 +1187,15 @@ async function deleteSubmission(submissionNo) {
 }
 
 async function deleteDatabaseSubmission(submissionNo) {
+  const existing = await getDatabasePool().query(
+    "SELECT foto_lokasi FROM bss_registrations WHERE no = $1 LIMIT 1",
+    [submissionNo],
+  );
+
+  if (existing.rowCount === 0) return false;
+
+  await deleteCloudinaryPhotos(parsePhotoUrls(existing.rows[0].foto_lokasi));
+
   const response = await getDatabasePool().query(
     "DELETE FROM bss_registrations WHERE no = $1",
     [submissionNo],
@@ -1286,6 +1346,11 @@ async function deleteLocalSubmission(submissionNo) {
   );
 
   if (nextSubmissions.length === existing.length) return false;
+
+  const deletedSubmission = existing.find(
+    (submission) => Number(submission.no) === submissionNo,
+  );
+  await deleteCloudinaryPhotos(parsePhotoUrls(deletedSubmission?.fotoLokasi));
 
   await writeFile(jsonPath, `${JSON.stringify(nextSubmissions, null, 2)}\n`);
 
