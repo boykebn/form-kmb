@@ -164,6 +164,8 @@ function AdminDataPage() {
   const [editStatus, setEditStatus] = useState("idle");
   const [editMessage, setEditMessage] = useState("");
   const [deletingNo, setDeletingNo] = useState(null);
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [toast, setToast] = useState(null);
   const [importStatus, setImportStatus] = useState("idle");
   const [exportStatus, setExportStatus] = useState("idle");
   const [searchQuery, setSearchQuery] = useState("");
@@ -256,6 +258,20 @@ function AdminDataPage() {
     };
   }, [adminToken]);
 
+  useEffect(() => {
+    if (!toast) return undefined;
+
+    const timeoutId = window.setTimeout(() => {
+      setToast(null);
+    }, 4600);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [toast]);
+
+  function showToast(type, title, description) {
+    setToast({ type, title, description });
+  }
+
   async function handleAdminLogin(event) {
     event.preventDefault();
     setStatus("loading");
@@ -347,18 +363,31 @@ function AdminDataPage() {
       setEditingSubmission(null);
       setEditForm({});
       setEditStatus("idle");
+      showToast(
+        "success",
+        "Data diperbarui",
+        `No ${result.submission.no} berhasil disimpan.`,
+      );
     } catch (error) {
       setEditStatus("error");
       setEditMessage(error.message);
+      showToast("error", "Gagal menyimpan data", error.message);
     }
   }
 
-  async function deleteData(submission) {
-    const confirmed = window.confirm(
-      `Hapus data No ${submission.no} - ${submission.siteName}?`,
-    );
+  function requestDelete(submission) {
+    setPendingDelete(submission);
+    setMessage("");
+  }
 
-    if (!confirmed) return;
+  function closeDeleteModal() {
+    if (deletingNo) return;
+    setPendingDelete(null);
+  }
+
+  async function confirmDelete() {
+    const submission = pendingDelete;
+    if (!submission) return;
 
     setDeletingNo(submission.no);
     setMessage("");
@@ -379,9 +408,17 @@ function AdminDataPage() {
       setSubmissions((current) =>
         current.filter((item) => Number(item.no) !== Number(submission.no)),
       );
+      setPendingDelete(null);
+      setStatus("success");
+      showToast(
+        "success",
+        "Data dihapus",
+        `No ${submission.no} - ${submission.siteName} sudah dihapus.`,
+      );
     } catch (error) {
       setMessage(error.message);
       setStatus("error");
+      showToast("error", "Gagal menghapus data", error.message);
     } finally {
       setDeletingNo(null);
     }
@@ -413,12 +450,14 @@ function AdminDataPage() {
       setSubmissions(result.submissions || []);
       setStatus("success");
       setPage(1);
-      setMessage(result.message);
+      setMessage("");
       setImportStatus("success");
+      showToast("success", "Import selesai", result.message);
     } catch (error) {
       setMessage(error.message);
       setStatus("error");
       setImportStatus("error");
+      showToast("error", "Import gagal", error.message);
     } finally {
       if (importInputRef.current) {
         importInputRef.current.value = "";
@@ -452,10 +491,16 @@ function AdminDataPage() {
       link.remove();
       URL.revokeObjectURL(url);
       setExportStatus("success");
+      showToast(
+        "success",
+        "Export CSV dimulai",
+        "File data pendaftaran sedang diunduh.",
+      );
     } catch (error) {
       setMessage(error.message);
       setStatus("error");
       setExportStatus("error");
+      showToast("error", "Export gagal", error.message);
     }
   }
 
@@ -555,9 +600,9 @@ function AdminDataPage() {
               </button>
             </div>
           </div>
-          {message && (
+          {status === "error" && message && (
             <p
-              className={`dashboard-notice ${status === "error" ? "error" : "success"}`}
+              className="dashboard-notice error"
             >
               {message}
             </p>
@@ -654,7 +699,7 @@ function AdminDataPage() {
                           <button
                             className="sheet-action-button sheet-action-danger"
                             type="button"
-                            onClick={() => deleteData(submission)}
+                            onClick={() => requestDelete(submission)}
                             disabled={deletingNo === submission.no}
                           >
                             {deletingNo === submission.no ? "..." : "Hapus"}
@@ -783,6 +828,15 @@ function AdminDataPage() {
           onSubmit={saveEdit}
         />
       )}
+      {pendingDelete && (
+        <ConfirmDeleteModal
+          submission={pendingDelete}
+          isDeleting={deletingNo === pendingDelete.no}
+          onCancel={closeDeleteModal}
+          onConfirm={confirmDelete}
+        />
+      )}
+      <ToastNotice toast={toast} onClose={() => setToast(null)} />
     </main>
   );
 }
@@ -971,6 +1025,61 @@ function EditSubmissionModal({
           {message && <p className="status error">{message}</p>}
         </div>
       </form>
+    </div>
+  );
+}
+
+function ConfirmDeleteModal({ submission, isDeleting, onCancel, onConfirm }) {
+  return (
+    <div className="confirm-modal-backdrop" role="dialog" aria-modal="true">
+      <section className="confirm-modal" aria-labelledby="delete-modal-title">
+        <div className="confirm-modal-header">
+          <span>Konfirmasi Hapus</span>
+          <h2 id="delete-modal-title">Hapus data lokasi?</h2>
+        </div>
+        <div className="confirm-modal-body">
+          <p>
+            Data <strong>No {submission.no}</strong>
+            {submission.siteName ? ` - ${submission.siteName}` : ""} akan
+            dihapus dari database.
+          </p>
+          <p className="confirm-warning">
+            Foto Cloudinary yang terhubung dengan data ini juga akan ikut
+            dihapus.
+          </p>
+        </div>
+        <div className="confirm-modal-actions">
+          <button type="button" onClick={onCancel} disabled={isDeleting}>
+            Batal
+          </button>
+          <button
+            className="confirm-danger-button"
+            type="button"
+            onClick={onConfirm}
+            disabled={isDeleting}
+          >
+            {isDeleting ? "Menghapus..." : "Hapus Data"}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ToastNotice({ toast, onClose }) {
+  if (!toast) return null;
+
+  return (
+    <div className="toast-stack" role="status" aria-live="polite">
+      <div className={`toast-card toast-${toast.type}`}>
+        <div>
+          <strong>{toast.title}</strong>
+          <p>{toast.description}</p>
+        </div>
+        <button type="button" onClick={onClose} aria-label="Tutup notifikasi">
+          x
+        </button>
+      </div>
     </div>
   );
 }
